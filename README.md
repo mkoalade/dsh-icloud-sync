@@ -37,6 +37,13 @@ strip (the row with 复制 / 好的回答 / 有问题的回答) carries an 上�
 as the project is not running. The **云端** tab is the iCloud side: it lists only the sessions that
 exist in iCloud and offers 下载 and 删除云端. Sessions that live only on this Mac never show up there.
 
+Rows are grouped by project, and every group header carries **上传项目** and **下载项目**:
+
+- **上传项目** uploads every session of that project this Mac has, including the ones iCloud has never
+  seen (the header shows how many are 未上传). Live sessions contribute their already-persisted messages.
+- **下载项目** downloads every cloud copy of that project that is newer than the local one; copies that
+  are already identical are left alone, and running sessions are skipped instead of failing the batch.
+
 - Every row shows title, project, last activity, size and one of four states: 已上传 / 未上传 /
   云端更新 / 仅云端.
 - **上传到 iCloud** overwrites the cloud snapshot of that session; the previous snapshot moves to
@@ -201,7 +208,14 @@ MIT.
 侧栏现在是「任务 / 频道 / 云端 / 日程」四个页签。同步完全手动，分为两半：**上传**在对话里发起——
 打开会话后，助手消息操作条（也就是「复制 / 好的回答 / 有问题的回答」那一行）最右边有「上传到
 iCloud」按钮，项目没在运行时就能点；**云端**页签是 iCloud 侧，只列出 iCloud 里真实存在的会话，
-负责「下载」和「删除云端」。只在本机、还没上传过的会话不会出现在这里。
+负责「下载」和「删除云端」。只在本机、还没上传过的会话不会在这里单独成行。
+
+行按项目分组，每组标题右侧有 **上传项目** / **下载项目**：
+
+- **上传项目**：把这个项目在本机的所有会话一起传上去（包括从没上传过的，组标题会标「未上传 N」）；
+  运行中的会话传它已经落盘的部分。
+- **下载项目**：把这个项目所有比本机新的云端副本一起拉下来；已经一致的不动，运行中的会话跳过、
+  不会让整批失败。
 
 - 每行显示标题、项目、最后活动时间、大小，以及四种状态之一：已上传 / 未上传 / 云端更新 / 仅云端。
 - **上传到 iCloud**（在会话操作条里）：用本机版本覆盖这个会话的云端快照；上一版移入

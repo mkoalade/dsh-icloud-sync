@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "iCloud Sync",
-    "description": "Sync DSH profiles, plugin manifests and skills between Macs through iCloud Drive; upload sessions from the conversation strip; download or delete iCloud copies in the 云端 tab."
+    "description": "Sync DSH profiles, plugin manifests and skills between Macs through iCloud Drive; upload sessions one by one or per project; download whole projects or delete iCloud copies in the 云端 tab."
   }
 }

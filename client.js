@@ -772,6 +772,18 @@ window.__ModuleLoader__.load({
       headTitle: { fontSize: 13, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
       chips: { display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8, flex: "none" },
       list: { display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", minHeight: 0, flex: "1 1 auto", paddingRight: 2 },
+      group: { display: "flex", flexDirection: "column", gap: 6 },
+      groupHead: {
+        display: "flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "2px 2px 0",
+        minWidth: 0
+      },
+      groupName: { minWidth: 0, flex: "1 1 auto", display: "flex", flexDirection: "column", gap: 1 },
+      groupTitle: { fontSize: 12, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 },
+      groupSub: { color: "var(--dsw-alias-label-tertiary)", fontSize: 10.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+      groupOps: { display: "flex", gap: 4, flex: "none", flexWrap: "wrap", justifyContent: "flex-end" },
       row: {
         background: "var(--dsw-alias-bg-layer-1)",
         border: "1px solid var(--dsw-alias-border-l2)",
@@ -950,6 +962,37 @@ window.__ModuleLoader__.load({
           .finally(function () { setBusy(""); });
       }, [props.refreshSessions]);
 
+      const actBulk = React.useCallback(function (action, projectKey, label) {
+        setBusy(action + ":" + projectKey);
+        setNote("");
+        fetch(API + "/cloud/action", {
+          method: "POST",
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json", "x-dsh-icloud-sync": "1" },
+          body: JSON.stringify({ action: action, projectKey: projectKey, scope: "cloud" })
+        })
+          .then(function (response) {
+            return response.json().then(function (data) {
+              if (!response.ok || data === null || data.ok === false) {
+                throw new Error(data && data.error ? data.error : "HTTP " + response.status);
+              }
+              if (data.snapshot) setState({ loading: false, error: null, data: data.snapshot });
+              const parts = [label];
+              if (typeof data.uploaded === "number") parts.push("上传 " + data.uploaded + " 个" + (data.partial > 0 ? "（含 " + data.partial + " 个运行中会话的已落盘部分）" : ""));
+              if (typeof data.downloaded === "number") parts.push("下载 " + data.downloaded + " 个");
+              if (Array.isArray(data.skipped) && data.skipped.length > 0) parts.push("跳过 " + data.skipped.length + " 个");
+              if (Array.isArray(data.failed) && data.failed.length > 0) parts.push("失败 " + data.failed.length + " 个");
+              setNote(parts.join("，") + "。");
+              if (action === "download-project" && typeof props.refreshSessions === "function") props.refreshSessions();
+            });
+          })
+          .catch(function (error) {
+            setNote(error instanceof Error ? error.message : String(error));
+          })
+          .finally(function () { setBusy(""); });
+      }, [props.refreshSessions]);
+
       const openSession = React.useCallback(function (sessionId) {
         if (typeof props.openSession === "function") {
           try { props.openSession(sessionId); return; } catch { /* fall through */ }
@@ -1015,6 +1058,63 @@ window.__ModuleLoader__.load({
           ops.length > 0 ? h("div", { style: CS.rowOps }, ops) : null);
       }
 
+      const projectByKey = new Map();
+      if (data !== null && Array.isArray(data.projects)) {
+        for (const project of data.projects) projectByKey.set(project.projectKey, project);
+      }
+      const groups = [];
+      const groupIndex = new Map();
+      for (const session of sessions) {
+        let group = groupIndex.get(session.projectKey);
+        if (group === undefined) {
+          group = { key: session.projectKey, project: projectByKey.get(session.projectKey) || null, rows: [] };
+          groupIndex.set(session.projectKey, group);
+          groups.push(group);
+        }
+        group.rows.push(session);
+      }
+
+      function groupHeader(group) {
+        const project = group.project;
+        const name = project && typeof project.name === "string" && project.name !== "" ? shortPath(project.name) : group.key;
+        const cloudCount = project ? project.cloud : group.rows.length;
+        const localCount = project ? project.local : 0;
+        const uploadable = project ? project.uploadable : 0;
+        const downloadable = project ? project.downloadable : 0;
+        const busyGroup = busy !== "";
+        const localOnly = project ? project.localOnly : 0;
+        const sub = ["云端 " + cloudCount];
+        if (localCount > 0) sub.push("本机 " + localCount);
+        if (localOnly > 0) sub.push("未上传 " + localOnly);
+        return h("div", { key: "head:" + group.key, style: CS.groupHead },
+          h("div", { style: CS.groupName },
+            h("div", { style: CS.groupTitle, title: project && project.name ? project.name : group.key }, name),
+            h("div", { style: CS.groupSub }, sub.join(" · "))),
+          h("div", { style: CS.groupOps },
+            h("button", {
+              type: "button",
+              style: CS.mini,
+              disabled: busyGroup || uploadable === 0,
+              title: uploadable === 0 ? "这个项目在本机没有可上传的会话" : "把本项目在本机的所有会话上传到 iCloud",
+              onClick: function () {
+                if (typeof window !== "undefined" && typeof window.confirm === "function" &&
+                    !window.confirm("把「" + name + "」在本机的 " + uploadable + " 个会话全部上传到 iCloud？云端旧副本会移入 history/。")) return;
+                actBulk("upload-project", group.key, "已上传「" + name + "」");
+              }
+            }, busy === "upload-project:" + group.key ? "上传中…" : "上传项目"),
+            h("button", {
+              type: "button",
+              style: CS.mini,
+              disabled: busyGroup || downloadable === 0,
+              title: downloadable === 0 ? "这个项目的云端版本已和本机一致" : "把本项目所有有更新的云端会话下载到本机",
+              onClick: function () {
+                if (typeof window !== "undefined" && typeof window.confirm === "function" &&
+                    !window.confirm("从 iCloud 下载「" + name + "」的 " + downloadable + " 个会话到本机？本机旧版本会先备份。")) return;
+                actBulk("download-project", group.key, "已下载「" + name + "」");
+              }
+            }, busy === "download-project:" + group.key ? "下载中…" : "下载项目")));
+      }
+
       const cloudMissing = data !== null && data.cloudExists === false;
       let body;
       if (state.loading && data === null) {
@@ -1024,7 +1124,11 @@ window.__ModuleLoader__.load({
       } else if (sessions.length === 0) {
         body = h("div", { style: CS.empty }, "iCloud 里还没有会话。在对话的助手操作条里点「上传到 iCloud」，这里才会出现。");
       } else {
-        body = h("div", { style: CS.list }, sessions.map(row));
+        body = h("div", { style: CS.list }, groups.map(function (group) {
+          return h("div", { key: "group:" + group.key, style: CS.group },
+            groupHeader(group),
+            group.rows.map(row));
+        }));
       }
 
       const machine = data !== null && data.machine ? data.machine.name : null;

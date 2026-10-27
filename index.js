@@ -395,6 +395,7 @@ function sessionSnapshot(hostCtx, engine, scope) {
     cloudExists: state.cloudExists,
     sessionsDir: SESSIONS_DIR,
     summary: iCloudOnly ? cloudSummaryOf(sessions, state.summary) : state.summary,
+    projects: state.projects,
     sessions
   };
 }
@@ -530,12 +531,20 @@ export function apply(ctx, config) {
         try {
           const body = await readJson(request);
           const action = typeof body.action === "string" ? body.action : "";
-          if (action !== "upload" && action !== "download" && action !== "remove") {
+          const allowed = ["upload", "download", "remove", "upload-project", "download-project"];
+          if (!allowed.includes(action)) {
             sendJson(response, 400, { ok: false, error: "未知操作" });
             return;
           }
-          const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
-          if (!/^session-[A-Za-z0-9._-]+$/.test(sessionId)) {
+          const bulk = action === "upload-project" || action === "download-project";
+          let sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+          let projectKey = typeof body.projectKey === "string" ? body.projectKey : "";
+          if (bulk) {
+            if (!/^[A-Za-z0-9._~-]{1,400}$/.test(projectKey)) {
+              sendJson(response, 400, { ok: false, error: "项目标识不合法" });
+              return;
+            }
+          } else if (!/^session-[A-Za-z0-9._-]+$/.test(sessionId)) {
             sendJson(response, 400, { ok: false, error: "会话 id 不合法" });
             return;
           }
@@ -545,7 +554,11 @@ export function apply(ctx, config) {
               ? sessionEngine.upload(sessionId, live)
               : action === "download"
                 ? sessionEngine.download(sessionId, live)
-                : sessionEngine.remove(sessionId);
+                : action === "remove"
+                  ? sessionEngine.remove(sessionId)
+                  : action === "upload-project"
+                    ? sessionEngine.uploadProject(projectKey, live)
+                    : sessionEngine.downloadProject(projectKey, live);
             const scope = body.scope === "cloud" ? "cloud" : "all";
             sendJson(response, 200, Object.assign({ action }, result, { snapshot: sessionSnapshot(hostCtx, sessionEngine, scope) }));
           } catch (error) {
