@@ -1,0 +1,7 @@
+url: https://github.com/mkoalade/dsh-icloud-sync
+name: mkoalade/dsh-icloud-sync
+category: ui
+description:
+  en: "Sync DSH profiles, plugin manifests, and skills between Macs through iCloud Drive, with a settings panel and a bundled dsh-sync CLI."
+  zh: "通过 iCloud 云盘在两台 Mac 之间同步 DSH 的 profile、插件清单与技能，自带设置面板与内置的 dsh-sync 命令行。"
+icon: https://raw.githubusercontent.com/mkoalade/dsh-icloud-sync/main/assets/icon-180.png

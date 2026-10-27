@@ -1,0 +1,1125 @@
+#!/bin/bash
+# dsh-sync — sync DeepSeek Harness settings between Macs through iCloud Drive.
+#
+# Only small text configuration files are synced. node_modules, runtimes,
+# caches, sessions and credentials never enter iCloud.
+#
+# Every machine keeps a local "base" copy of the last agreed state, so a
+# three-way comparison can tell "local changed" from "cloud changed" and
+# refuse to silently overwrite either side. The cloud bundle is written
+# manifest-last, so a half-uploaded push is never mistaken for a deletion.
+#
+# Tested with macOS bash 3.2. Do not use bash-4-only syntax here.
+
+set -u
+set -o pipefail
+
+VERSION="1.0.0"
+SCHEMA="1"
+
+SCRIPT_PATH=$(cd "$(dirname "$0")" 2>/dev/null && pwd)/$(basename "$0")
+SCRIPT_DIR=$(dirname "$SCRIPT_PATH")
+
+ROOT="${DSH_SYNC_ROOT:-$HOME/.dsh}"
+PROFILE_NAME="${DSH_SYNC_PROFILE:-desktop}"
+PROFILE="$ROOT/profiles/$PROFILE_NAME"
+SKILLS="${DSH_SYNC_SKILLS:-$HOME/.agents/skills}"
+CLOUD="${DSH_SYNC_CLOUD:-$HOME/Library/Mobile Documents/com~apple~CloudDocs/DSH-Sync}"
+CURRENT="$CLOUD/current"
+HISTORY="$CLOUD/history"
+STATE_DIR="$ROOT/.icloud-sync"
+STATE="$STATE_DIR/state.tsv"
+BASE="$STATE_DIR/base"
+BACKUPS="$STATE_DIR/backups"
+LOCK="$STATE_DIR/lock"
+APP="${DSH_SYNC_APP:-/Applications/DeepSeek Harness.app}"
+CLI="$APP/Contents/Resources/runtime/cli/bin/dsh"
+ICLOUD_ROOT="$HOME/Library/Mobile Documents/com~apple~CloudDocs"
+
+PROFILE_FILES='cordis.patch.yml
+package.json
+pnpm-lock.yaml
+pnpm-workspace.yaml
+.dsh-market/state.json'
+
+RAW_MACHINE=$(scutil --get LocalHostName 2>/dev/null || true)
+[ -n "$RAW_MACHINE" ] || RAW_MACHINE=$(hostname -s 2>/dev/null || true)
+MACHINE="${DSH_SYNC_MACHINE:-$RAW_MACHINE}"
+MACHINE=$(printf '%s' "$MACHINE" | tr -c '[:alnum:]._-' '-' | sed 's/^-*//; s/-*$//')
+[ -n "$MACHINE" ] || MACHINE="mac"
+
+QUIET=0
+FORCE=0
+DRY=0
+NO_INSTALL=0
+AGENT_ACTION=""
+STATE_LOADED=0
+ACQUIRED_LOCK=0
+ACTIVE_BUNDLE=""
+TMP=""
+STATUS_FILE=""
+
+log()  { [ "$QUIET" -eq 1 ] || printf '%s\n' "$*"; }
+warn() { printf '警告: %s\n' "$*" >&2; }
+err()  { printf '错误: %s\n' "$*" >&2; }
+die()  { err "$*"; exit 1; }
+
+usage() {
+  cat <<'EOF'
+dsh-sync — 通过 iCloud Drive 在几台 Mac 之间同步 DSH 设置
+
+用法:
+  dsh-sync init                 第一次：把本机设置发布到 iCloud（云端必须为空）
+  dsh-sync status               查看差异（默认命令）
+  dsh-sync push                 把本地改动上传到 iCloud
+  dsh-sync pull                 把云端改动下载到本机
+  dsh-sync sync                 自动判断方向（供登录后台任务使用）
+  dsh-sync diff                 查看具体的文本差异
+  dsh-sync install-plugins      按 package.json 安装/更新插件
+  dsh-sync agent on|off|status  登录时及每 15 分钟自动同步
+  dsh-sync doctor               诊断环境、iCloud 与 manifest 一致性
+  dsh-sync open                 在 Finder 中打开 iCloud 同步目录
+  dsh-sync version              显示版本
+
+选项:
+  --force, -f       冲突时强制用本地(push)或云端(pull)覆盖
+  --dry-run, -n     只显示计划，不写文件
+  --no-install      pull 后不自动安装插件
+  --quiet, -q       静默（后台任务用）
+
+同步内容:
+  ~/.dsh/profiles/desktop/cordis.patch.yml
+  ~/.dsh/profiles/desktop/package.json
+  ~/.dsh/profiles/desktop/pnpm-lock.yaml
+  ~/.dsh/profiles/desktop/pnpm-workspace.yaml
+  ~/.dsh/profiles/desktop/.dsh-market/state.json
+  ~/.agents/skills/**
+
+不同步:
+  node_modules / dsh-runtimes / cache / attachments / sessions / storages /
+  .credentials.yaml（登录凭据请各自登录，或手动保管）
+EOF
+}
+
+cleanup() {
+  release_lock
+  if [ -n "${TMP:-}" ] && [ -d "$TMP" ]; then rm -rf "$TMP"; fi
+}
+trap cleanup EXIT INT TERM
+
+hash_file() {
+  if [ -f "$1" ]; then shasum -a 256 "$1" | awk '{print $1}'; else printf '%s\n' '-'; fi
+}
+
+stable_hash() {
+  local f="$1" h1 h2 i=0
+  h1=$(hash_file "$f")
+  while [ "$i" -lt 3 ]; do
+    sleep 0.15
+    h2=$(hash_file "$f")
+    [ "$h1" = "$h2" ] && { printf '%s\n' "$h1"; return 0; }
+    h1="$h2"
+    i=$((i + 1))
+  done
+  printf '%s\n' "$h1"
+}
+
+short_hash() {
+  case "$1" in ''|'-') printf '%s\n' '-' ;; *) printf '%s\n' "$1" | cut -c1-8 ;; esac
+}
+
+sort_tsv() { LC_ALL=C sort -t$'\t' -k1,1 "$1" -o "$1"; }
+
+manifest_get() {
+  [ -f "$CURRENT/manifest.tsv" ] || { printf '\n'; return 0; }
+  awk -F'\t' -v k="$1" '$1==k { print $2; exit }' "$CURRENT/manifest.tsv"
+}
+
+state_get() {
+  [ -f "$STATE" ] || { printf '\n'; return 0; }
+  awk -F'\t' -v k="$1" '$1==k { print $2; exit }' "$STATE"
+}
+
+app_version() {
+  if [ -f "$APP/Contents/Info.plist" ]; then
+    /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Contents/Info.plist" 2>/dev/null || printf '%s\n' '-'
+  else
+    printf '%s\n' '-'
+  fi
+}
+
+is_dsh_running() {
+  case "${DSH_SYNC_DSH_RUNNING:-auto}" in
+    0) return 1 ;;
+    1) return 0 ;;
+  esac
+  pgrep -f "DeepSeek Harness.app/Contents/MacOS" >/dev/null 2>&1
+}
+
+notify() {
+  local msg
+  msg=$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')
+  osascript -e "display notification \"$msg\" with title \"DSH 同步\"" >/dev/null 2>&1 || true
+}
+
+ensure_dirs() {
+  mkdir -p "$STATE_DIR" "$BASE" "$BACKUPS" || die "无法创建 $STATE_DIR"
+  chmod 700 "$STATE_DIR" 2>/dev/null || true
+}
+
+acquire_lock() {
+  ensure_dirs
+  if mkdir "$LOCK" 2>/dev/null; then
+    ACQUIRED_LOCK=1
+    printf '%s\n' "$$" > "$LOCK/pid" 2>/dev/null || true
+    return 0
+  fi
+  local age
+  age=$(( $(date +%s) - $(stat -f %m "$LOCK" 2>/dev/null || printf '0') ))
+  if [ "$age" -gt 600 ]; then
+    rm -rf "$LOCK"
+    if mkdir "$LOCK" 2>/dev/null; then
+      ACQUIRED_LOCK=1
+      printf '%s\n' "$$" > "$LOCK/pid" 2>/dev/null || true
+      return 0
+    fi
+  fi
+  return 1
+}
+
+release_lock() {
+  if [ "${ACQUIRED_LOCK:-0}" -eq 1 ] && [ -d "$LOCK" ]; then rm -rf "$LOCK"; fi
+  ACQUIRED_LOCK=0
+}
+
+require_cloud_parent() {
+  if [ -z "${DSH_SYNC_CLOUD:-}" ]; then
+    [ -d "$ICLOUD_ROOT" ] || die "找不到 iCloud Drive（${ICLOUD_ROOT}）。请先登录 iCloud 并开启 iCloud Drive。"
+  fi
+}
+
+require_profile() {
+  [ -d "$PROFILE" ] || die "找不到 ${PROFILE}。请先启动一次 DeepSeek Harness 再退出，然后重试。"
+  [ -f "$PROFILE/cordis.patch.yml" ] || die "找不到 $PROFILE/cordis.patch.yml。请先启动一次 DSH。"
+}
+
+local_abs() {
+  case "$1" in
+    profile/*) printf '%s/%s\n' "$PROFILE" "${1#profile/}" ;;
+    skills/*)  printf '%s/%s\n' "$SKILLS" "${1#skills/}" ;;
+    *) return 1 ;;
+  esac
+}
+
+prune_empty_skill_dirs() {
+  local root="$1" rel="$2" dir
+  case "$rel" in skills/*) ;; *) return 0 ;; esac
+  if [ "$root" = "$SKILLS" ]; then
+    dir=$(dirname "$SKILLS/${rel#skills/}")
+  else
+    dir=$(dirname "$root/$rel")
+  fi
+  while [ "$dir" != "$root" ] && [ -d "$dir" ]; do
+    rmdir "$dir" 2>/dev/null || break
+    dir=$(dirname "$dir")
+  done
+}
+
+copy_file() {
+  local src="$1" dst="$2" tmp
+  [ -f "$src" ] || return 1
+  mkdir -p "$(dirname "$dst")" || return 1
+  tmp="$dst.tmp.$$"
+  cp -p "$src" "$tmp" || { rm -f "$tmp"; return 1; }
+  mv -f "$tmp" "$dst" || return 1
+  case "$dst" in "$PROFILE"/*) chmod 600 "$dst" 2>/dev/null || true ;; esac
+  return 0
+}
+
+list_local_rels() {
+  local f
+  printf '%s\n' "$PROFILE_FILES" | while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    [ -f "$PROFILE/$f" ] && printf 'profile/%s\n' "$f"
+  done
+  if [ -d "$SKILLS" ]; then
+    ( cd "$SKILLS" && find . -type f \
+        ! -name '.DS_Store' ! -name '*.icloud' \
+        ! -path './.git/*' ! -path '*/.git/*' \
+        ! -path '*/node_modules/*' ! -path '*/__pycache__/*' \
+        -print0 ) | while IFS= read -r -d '' p; do
+      p=${p#./}
+      [ -n "$p" ] && printf 'skills/%s\n' "$p"
+    done
+  fi
+}
+
+list_base_rels() {
+  [ -d "$BASE" ] || return 0
+  ( cd "$BASE" && find . -type f ! -name '.DS_Store' ! -name '*.icloud' -print0 ) |
+    while IFS= read -r -d '' p; do
+      p=${p#./}
+      [ -n "$p" ] && printf '%s\n' "$p"
+    done
+}
+
+list_manifest_rels() {
+  [ -f "$CURRENT/manifest.tsv" ] || return 0
+  awk -F'\t' '$1=="file" { print $2 }' "$CURRENT/manifest.tsv"
+}
+
+collect_local_hashes() {
+  local out="$1" rel abs
+  : > "$out"
+  list_local_rels > "$TMP/local-rels"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    abs=$(local_abs "$rel") || continue
+    case "$rel" in
+      profile/*) printf '%s\t%s\n' "$rel" "$(stable_hash "$abs")" >> "$out" ;;
+      *)         printf '%s\t%s\n' "$rel" "$(hash_file "$abs")" >> "$out" ;;
+    esac
+  done < "$TMP/local-rels"
+  sort_tsv "$out"
+}
+
+collect_base_hashes() {
+  local out="$1" rel abs
+  : > "$out"
+  list_base_rels > "$TMP/base-rels"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    abs="$BASE/$rel"
+    [ -f "$abs" ] && printf '%s\t%s\n' "$rel" "$(hash_file "$abs")" >> "$out"
+  done < "$TMP/base-rels"
+  sort_tsv "$out"
+}
+
+collect_cloud_hashes() {
+  local out="$1" rel abs
+  : > "$out"
+  list_manifest_rels > "$TMP/cloud-rels"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    abs="$CURRENT/$rel"
+    printf '%s\t%s\n' "$rel" "$(hash_file "$abs")" >> "$out"
+  done < "$TMP/cloud-rels"
+  sort_tsv "$out"
+}
+
+build_status() {
+  local bf="$1" lf="$2" rf="$3" out="$4"
+  awk -F'\t' -v f1="$bf" -v f2="$lf" -v f3="$rf" '
+    FILENAME==f1 { base[$1]=$2; seen[$1]=1; next }
+    FILENAME==f2 { loc[$1]=$2;  seen[$1]=1; next }
+    FILENAME==f3 { rem[$1]=$2;  seen[$1]=1; next }
+    END {
+      for (k in seen) {
+        l = (k in loc)  ? loc[k]  : "-";
+        r = (k in rem)  ? rem[k]  : "-";
+        b = (k in base) ? base[k] : "-";
+        st = "conflict";
+        if (l == r)      st = "same";
+        else if (l == b) st = "remote";
+        else if (r == b) st = "local";
+        printf "%s\t%s\t%s\t%s\t%s\n", k, st, l, r, b;
+      }
+    }
+  ' "$bf" "$lf" "$rf" | LC_ALL=C sort -t$'\t' -k1,1 > "$out"
+}
+
+count_status() { awk -F'\t' -v s="$1" '$2==s { n++ } END { print n+0 }' "$STATUS_FILE"; }
+
+status_label() {
+  case "$1" in
+    same)     printf '已同步' ;;
+    local)    if [ "$2" = "-" ]; then printf '本地已删除 → push'; else printf '本地较新 → push'; fi ;;
+    remote)   if [ "$3" = "-" ]; then printf '云端已删除 → pull'; else printf '云端较新 → pull'; fi ;;
+    conflict) printf '两边都改 → 冲突' ;;
+    *)        printf '%s' "$1" ;;
+  esac
+}
+
+ensure_cloud_complete() {
+  [ -f "$CURRENT/manifest.tsv" ] || return 0
+  list_manifest_rels > "$TMP/manifest-rels"
+  local rel missing=0 i=0
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    if [ ! -f "$CURRENT/$rel" ]; then
+      brctl download "$CURRENT/$rel" >/dev/null 2>&1 || true
+      missing=1
+    fi
+  done < "$TMP/manifest-rels"
+  [ "$missing" -eq 0 ] && return 0
+  while [ "$i" -lt 20 ]; do
+    sleep 1
+    missing=0
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      [ -f "$CURRENT/$rel" ] || missing=1
+    done < "$TMP/manifest-rels"
+    [ "$missing" -eq 0 ] && return 0
+    i=$((i + 1))
+  done
+  return 1
+}
+
+read_manifest_meta() {
+  local s
+  s=$(manifest_get schema)
+  [ -n "$s" ] || s=1
+  case "$s" in *[!0-9]*) s=1 ;; esac
+  [ "$s" -le "$SCHEMA" ] || die "云端同步包格式版本 $s 比本脚本（${SCHEMA}）新，请更新 dsh-sync。"
+  REMOTE_GEN=$(manifest_get generation)
+  case "$REMOTE_GEN" in ''|*[!0-9]*) REMOTE_GEN=0 ;; esac
+  REMOTE_BUNDLE=$(manifest_get bundleId)
+  REMOTE_MACHINE=$(manifest_get machine)
+  REMOTE_UPDATED=$(manifest_get updatedAt)
+  REMOTE_DSH=$(manifest_get dshVersion)
+  [ -n "$REMOTE_MACHINE" ] || REMOTE_MACHINE="?"
+  [ -n "$REMOTE_UPDATED" ] || REMOTE_UPDATED="?"
+  [ -n "$REMOTE_DSH" ] || REMOTE_DSH="?"
+}
+
+load_state() {
+  if [ -f "$STATE" ]; then
+    STATE_MACHINE=$(state_get machineId)
+    STATE_BUNDLE=$(state_get bundleId)
+    STATE_GEN=$(state_get lastGeneration)
+    STATE_MANIFEST_HASH=$(state_get lastManifestHash)
+    STATE_LOADED=1
+  else
+    STATE_MACHINE=""
+    STATE_BUNDLE=""
+    STATE_GEN=0
+    STATE_MANIFEST_HASH=""
+    STATE_LOADED=0
+  fi
+}
+write_manifest() {
+  local gen="$1" rels_file="$2" rel abs sha size mtime count=0
+  local tmp="$CURRENT/.manifest.tsv.tmp.$$"
+  local lines="$TMP/manifest-lines"
+  : > "$lines"
+  { list_manifest_rels; cat "$rels_file"; } | LC_ALL=C sort -u > "$TMP/manifest-all"
+
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    case "$rel" in profile/*|skills/*) ;; *) continue ;; esac
+    abs="$CURRENT/$rel"
+    [ -f "$abs" ] || continue
+    sha=$(hash_file "$abs")
+    size=$(stat -f '%z' "$abs" 2>/dev/null || printf '0')
+    mtime=$(stat -f '%m' "$abs" 2>/dev/null || printf '0')
+    printf 'file\t%s\t%s\t%s\t%s\n' "$rel" "$sha" "$size" "$mtime" >> "$lines"
+    count=$((count + 1))
+  done < "$TMP/manifest-all"
+
+  [ "$count" -gt 0 ] || die "没有可写入 manifest 的文件"
+
+  {
+    printf 'schema\t%s\n' "$SCHEMA"
+    printf 'generation\t%s\n' "$gen"
+    printf 'bundleId\t%s\n' "$ACTIVE_BUNDLE"
+    printf 'machine\t%s\n' "$MACHINE"
+    printf 'updatedAt\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'dshVersion\t%s\n' "$(app_version)"
+    printf 'profile\t%s\n' "$PROFILE_NAME"
+    printf 'fileCount\t%s\n' "$count"
+    cat "$lines"
+  } > "$tmp" || die "写 manifest 失败"
+
+  chmod 644 "$tmp" 2>/dev/null || true
+  mv -f "$tmp" "$CURRENT/manifest.tsv" || die "替换 manifest 失败"
+}
+
+write_state() {
+  local gen="$1" action="$2" tmp="$STATE.tmp.$$"
+  [ -n "${ACTIVE_BUNDLE:-}" ] || ACTIVE_BUNDLE=$(state_get bundleId)
+  {
+    printf 'schema\t%s\n' "$SCHEMA"
+    printf 'machineId\t%s\n' "$MACHINE"
+    printf 'bundleId\t%s\n' "$ACTIVE_BUNDLE"
+    printf 'lastGeneration\t%s\n' "$gen"
+    printf 'lastManifestHash\t%s\n' "$(hash_file "$CURRENT/manifest.tsv")"
+    printf 'lastSyncAt\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'lastAction\t%s\n' "$action"
+  } > "$tmp" || die "写本机状态失败"
+  mv -f "$tmp" "$STATE" || die "替换本机状态失败"
+  chmod 600 "$STATE" 2>/dev/null || true
+  STATE_LOADED=1
+}
+
+reset_base_from_local() {
+  local rels_file="$1" rel abs
+  rm -rf "$BASE"
+  mkdir -p "$BASE" || die "无法重建 base 目录"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    abs=$(local_abs "$rel") || continue
+    [ -f "$abs" ] || continue
+    copy_file "$abs" "$BASE/$rel" || die "备份 base 失败: $rel"
+  done < "$rels_file"
+}
+
+reset_base_from_cloud() {
+  local rels_file="$1" rel abs
+  rm -rf "$BASE"
+  mkdir -p "$BASE" || die "无法重建 base 目录"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    abs="$CURRENT/$rel"
+    [ -f "$abs" ] || continue
+    copy_file "$abs" "$BASE/$rel" || die "备份 base 失败: $rel"
+  done < "$rels_file"
+}
+
+set_base_from_local() {
+  local rel="$1" abs
+  abs=$(local_abs "$rel") || return 0
+  if [ -f "$abs" ]; then
+    copy_file "$abs" "$BASE/$rel" || warn "更新 base 失败: $rel"
+  else
+    rm -f "$BASE/$rel"
+    prune_empty_skill_dirs "$BASE" "$rel"
+  fi
+}
+
+set_base_from_cloud() {
+  local rel="$1" abs
+  abs="$CURRENT/$rel"
+  if [ -f "$abs" ]; then
+    copy_file "$abs" "$BASE/$rel" || warn "更新 base 失败: $rel"
+  else
+    rm -f "$BASE/$rel"
+    prune_empty_skill_dirs "$BASE" "$rel"
+  fi
+}
+
+reconcile_same_rows() {
+  local rel st l r b
+  while IFS=$'\t' read -r rel st l r b; do
+    [ -n "$rel" ] || continue
+    [ "$st" = "same" ] || continue
+    if [ "$l" = "-" ]; then
+      rm -f "$BASE/$rel"
+      prune_empty_skill_dirs "$BASE" "$rel"
+    else
+      set_base_from_local "$rel"
+    fi
+  done < "$STATUS_FILE"
+}
+
+backup_local() {
+  local label="$1" dest rel abs
+  dest="$BACKUPS/$(date -u +%Y%m%dT%H%M%SZ)-$MACHINE-$label"
+  mkdir -p "$dest" || return 1
+  list_local_rels > "$TMP/backup-rels"
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    abs=$(local_abs "$rel") || continue
+    [ -f "$abs" ] || continue
+    copy_file "$abs" "$dest/$rel" || return 1
+  done < "$TMP/backup-rels"
+  prune_backups
+  printf '%s\n' "$dest"
+}
+
+prune_backups() {
+  [ -d "$BACKUPS" ] || return 0
+  ls -1dt "$BACKUPS"/* 2>/dev/null | tail -n +21 | while IFS= read -r d; do
+    [ -n "$d" ] && rm -rf "$d"
+  done
+}
+
+backup_cloud() {
+  local label="$1" dest
+  dest="$HISTORY/$(date -u +%Y%m%dT%H%M%SZ)-$MACHINE-$label"
+  mkdir -p "$dest" || return 1
+  cp -R "$CURRENT/." "$dest/" 2>/dev/null || return 1
+  prune_history
+  printf '%s\n' "$dest"
+}
+
+prune_history() {
+  [ -d "$HISTORY" ] || return 0
+  ls -1dt "$HISTORY"/* 2>/dev/null | tail -n +31 | while IFS= read -r d; do
+    [ -n "$d" ] && rm -rf "$d"
+  done
+}
+
+refresh_tool() {
+  mkdir -p "$CLOUD/bin" 2>/dev/null || true
+  if [ "$SCRIPT_PATH" != "$CLOUD/bin/dsh-sync" ] && [ -f "$SCRIPT_PATH" ]; then
+    cp "$SCRIPT_PATH" "$CLOUD/bin/dsh-sync" 2>/dev/null && chmod 755 "$CLOUD/bin/dsh-sync" 2>/dev/null || true
+  fi
+  if [ -f "$SCRIPT_DIR/README.md" ] && [ "$SCRIPT_DIR/README.md" != "$CLOUD/README.md" ]; then
+    cp "$SCRIPT_DIR/README.md" "$CLOUD/README.md" 2>/dev/null || true
+  fi
+}
+
+install_plugins() {
+  if [ "${DSH_SYNC_SKIP_INSTALL:-0}" = "1" ]; then log "已跳过插件安装"; return 0; fi
+  if [ ! -x "$CLI" ]; then warn "找不到 DSH 命令行：$CLI"; return 1; fi
+  if is_dsh_running; then warn "DSH 正在运行，插件安装已跳过。"; return 2; fi
+  log "==> 安装/更新插件（pnpm install，需要联网）"
+  "$CLI" plugin --profile "$PROFILE_NAME" install
+}
+
+install_if_needed() {
+  local need="$1" noinstall="$2"
+  [ "$need" -eq 1 ] || return 0
+  if [ "$noinstall" -eq 1 ]; then log "已跳过插件安装（--no-install）"; return 0; fi
+  if ! install_plugins; then warn "插件没有安装/更新。退出 DSH 后运行: dsh-sync install-plugins"; fi
+}
+
+do_init() {
+  require_profile
+  require_cloud_parent
+  if [ -f "$CURRENT/manifest.tsv" ]; then
+    read_manifest_meta
+    die "云端已有同步包（第 $REMOTE_GEN 代，来自 ${REMOTE_MACHINE}）。不要在第二台机器上 init；请运行: dsh-sync pull"
+  fi
+  if [ -d "$CURRENT" ] && [ -n "$(ls -A "$CURRENT" 2>/dev/null)" ]; then
+    die "云端 current/ 目录非空但缺少 manifest。请检查 ${CURRENT}。"
+  fi
+
+  mkdir -p "$CURRENT" "$HISTORY" "$CLOUD/bin" || die "无法创建云端目录"
+  chmod 700 "$CLOUD" 2>/dev/null || true
+
+  list_local_rels > "$TMP/init-rels"
+  [ -s "$TMP/init-rels" ] || die "本机没有找到可同步的配置文件。"
+
+  while IFS= read -r rel; do
+    [ -n "$rel" ] || continue
+    copy_file "$(local_abs "$rel")" "$CURRENT/$rel" || die "复制到 iCloud 失败: $rel"
+  done < "$TMP/init-rels"
+
+  ACTIVE_BUNDLE=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]')
+  [ -n "$ACTIVE_BUNDLE" ] || ACTIVE_BUNDLE="bundle-$(date +%s)-$RANDOM"
+
+  write_manifest 1 "$TMP/init-rels"
+  reset_base_from_local "$TMP/init-rels"
+  write_state 1 "init"
+  refresh_tool
+
+  log "已创建 iCloud 同步包：$CLOUD"
+  log "  包含 $(wc -l < "$TMP/init-rels" | tr -d ' ') 个文件，第 1 代。"
+  log "第二台 Mac：先启动一次 DSH 再退出，然后运行"
+  log "  bash \"$CLOUD/bin/dsh-sync\" pull"
+}
+
+do_push() {
+  local force="$1" dry="$2" rel st l r b
+  require_profile
+  load_state
+
+  if [ "$STATE_LOADED" -eq 0 ]; then
+    if [ -f "$CURRENT/manifest.tsv" ]; then
+      warn "云端已有同步包，本机尚未接入。请先运行: dsh-sync pull"; return 2
+    fi
+    do_init; return $?
+  fi
+
+  [ -f "$CURRENT/manifest.tsv" ] || { warn "云端同步包不见了：$CURRENT/manifest.tsv"; return 2; }
+  ensure_cloud_complete || { warn "云端文件不完整（iCloud 可能还没下载完）。"; return 2; }
+  read_manifest_meta
+  if [ -n "$STATE_BUNDLE" ] && [ -n "$REMOTE_BUNDLE" ] && [ "$STATE_BUNDLE" != "$REMOTE_BUNDLE" ]; then
+    warn "云端同步包 ID 与本机记录不一致，可能被重建过。"; return 2
+  fi
+
+  collect_base_hashes "$TMP/base-h"
+  collect_local_hashes "$TMP/local-h"
+  collect_cloud_hashes "$TMP/cloud-h"
+  build_status "$TMP/base-h" "$TMP/local-h" "$TMP/cloud-h" "$TMP/status"
+  STATUS_FILE="$TMP/status"
+
+  local n_local n_conf
+  n_local=$(count_status local)
+  n_conf=$(count_status conflict)
+
+  if [ "$n_local" -eq 0 ] && [ "$n_conf" -eq 0 ]; then
+    reconcile_same_rows
+    log "没有需要上传的本地改动。"; return 0
+  fi
+
+  if [ "$n_conf" -gt 0 ] && [ "$force" -ne 1 ]; then
+    warn "检测到 $n_conf 个冲突（本地和云端都改过）："
+    awk -F'\t' '$2=="conflict" { print "  " $1 }' "$STATUS_FILE" >&2
+    warn "先运行 dsh-sync diff；确认用本地覆盖云端再运行 dsh-sync push --force"
+    return 2
+  fi
+
+  if [ "$dry" -eq 1 ]; then
+    log "dry-run：将上传 $n_local 个文件，冲突 $n_conf 个。"
+    awk -F'\t' '$2=="local" { print "  ↑ " $1 }' "$STATUS_FILE"
+    [ "$force" -eq 1 ] && awk -F'\t' '$2=="conflict" { print "  ⇑ (force) " $1 }' "$STATUS_FILE"
+    return 0
+  fi
+
+  backup_cloud "pre-push" >/dev/null || { warn "云端历史快照失败，已中止。"; return 1; }
+
+  local applied=0
+  while IFS=$'\t' read -r rel st l r b; do
+    [ -n "$rel" ] || continue
+    if [ "$st" = "local" ] || { [ "$st" = "conflict" ] && [ "$force" -eq 1 ]; }; then
+      if [ "$l" = "-" ]; then
+        rm -f "$CURRENT/$rel"
+        prune_empty_skill_dirs "$CURRENT" "$rel"
+      else
+        copy_file "$(local_abs "$rel")" "$CURRENT/$rel" || { warn "上传失败: $rel"; return 1; }
+      fi
+      applied=$((applied + 1))
+    fi
+  done < "$STATUS_FILE"
+
+  { list_manifest_rels; list_local_rels; } | LC_ALL=C sort -u > "$TMP/push-rels"
+  local base_gen="$REMOTE_GEN"
+  [ "${STATE_GEN:-0}" -gt "$base_gen" ] && base_gen="$STATE_GEN"
+  local new_gen=$((base_gen + 1))
+  write_manifest "$new_gen" "$TMP/push-rels"
+
+  while IFS=$'\t' read -r rel st l r b; do
+    [ -n "$rel" ] || continue
+    if [ "$st" = "local" ] || { [ "$st" = "conflict" ] && [ "$force" -eq 1 ]; }; then
+      if [ "$l" = "-" ]; then
+        rm -f "$BASE/$rel"
+        prune_empty_skill_dirs "$BASE" "$rel"
+      else
+        set_base_from_local "$rel"
+      fi
+    fi
+  done < "$STATUS_FILE"
+  reconcile_same_rows
+
+  write_state "$new_gen" "push"
+  refresh_tool
+
+  log "已上传 $applied 个改动到 iCloud（第 $new_gen 代）。"
+  log "另一台 Mac 运行 dsh-sync pull 即可拿到。"
+}
+
+do_pull() {
+  local force="$1" dry="$2" noinstall="$3" rel st l r b need_install=0 applied=0
+  require_profile
+  load_state
+
+  [ -f "$CURRENT/manifest.tsv" ] || { warn "云端还没有同步包。在本机运行: dsh-sync init"; return 3; }
+  ensure_cloud_complete || { warn "云端文件不完整（iCloud 可能还没下载完）。"; return 3; }
+  read_manifest_meta
+
+  if [ "$STATE_LOADED" -eq 0 ]; then
+    list_manifest_rels > "$TMP/pull-rels"
+    if [ "$dry" -eq 1 ]; then
+      log "dry-run：首次接入，将把 $(wc -l < "$TMP/pull-rels" | tr -d ' ') 个云端文件写入本机。"
+      return 0
+    fi
+    backup_local "first-pull" >/dev/null || { warn "本机备份失败，已中止。"; return 1; }
+
+    local old_pkg new_pkg
+    old_pkg=$(hash_file "$PROFILE/package.json")
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      copy_file "$CURRENT/$rel" "$(local_abs "$rel")" || { warn "写入本机失败: $rel"; return 1; }
+      case "$rel" in profile/package.json|profile/pnpm-lock.yaml|profile/pnpm-workspace.yaml) need_install=1 ;; esac
+    done < "$TMP/pull-rels"
+    new_pkg=$(hash_file "$PROFILE/package.json")
+    [ "$old_pkg" != "$new_pkg" ] && need_install=1
+    [ -d "$PROFILE/node_modules" ] || need_install=1
+
+    ACTIVE_BUNDLE="$REMOTE_BUNDLE"
+    [ -n "$ACTIVE_BUNDLE" ] || ACTIVE_BUNDLE=$(uuidgen 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    reset_base_from_cloud "$TMP/pull-rels"
+    write_state "$REMOTE_GEN" "pull-first"
+
+    if [ "$REMOTE_DSH" != "$(app_version)" ] && [ "$REMOTE_DSH" != "-" ]; then
+      warn "云端设置来自 DSH ${REMOTE_DSH}，本机是 $(app_version)；插件可能需要更新。"
+    fi
+    install_if_needed "$need_install" "$noinstall"
+
+    log "已接入 iCloud 同步包（第 $REMOTE_GEN 代，来自 ${REMOTE_MACHINE}）。"
+    log "本机原有设置已备份到 ${BACKUPS}。"
+    log "如果 DSH 正在运行，请重启一次让插件与设置生效。"
+    return 0
+  fi
+
+  collect_base_hashes "$TMP/base-h"
+  collect_local_hashes "$TMP/local-h"
+  collect_cloud_hashes "$TMP/cloud-h"
+  build_status "$TMP/base-h" "$TMP/local-h" "$TMP/cloud-h" "$TMP/status"
+  STATUS_FILE="$TMP/status"
+
+  local n_remote n_conf
+  n_remote=$(count_status remote)
+  n_conf=$(count_status conflict)
+  if [ "$n_remote" -eq 0 ] && [ "$n_conf" -eq 0 ]; then
+    reconcile_same_rows
+    log "云端没有新改动。"; return 0
+  fi
+
+  if [ "$n_conf" -gt 0 ] && [ "$force" -ne 1 ]; then
+    warn "检测到 $n_conf 个冲突（本地和云端都改过）："
+    awk -F'\t' '$2=="conflict" { print "  " $1 }' "$STATUS_FILE" >&2
+    warn "先运行 dsh-sync diff；确认用云端覆盖本地再运行 dsh-sync pull --force"
+    return 2
+  fi
+
+  if [ "$dry" -eq 1 ]; then
+    log "dry-run：将应用 $n_remote 个云端改动，冲突 $n_conf 个。"
+    awk -F'\t' '$2=="remote" { print "  ↓ " $1 }' "$STATUS_FILE"
+    [ "$force" -eq 1 ] && awk -F'\t' '$2=="conflict" { print "  ⇓ (force) " $1 }' "$STATUS_FILE"
+    return 0
+  fi
+
+  backup_local "pre-pull" >/dev/null || { warn "本机备份失败，已中止。"; return 1; }
+
+  while IFS=$'\t' read -r rel st l r b; do
+    [ -n "$rel" ] || continue
+    if [ "$st" = "remote" ] || { [ "$st" = "conflict" ] && [ "$force" -eq 1 ]; }; then
+      if [ "$r" = "-" ]; then
+        rm -f "$(local_abs "$rel")"
+        prune_empty_skill_dirs "$SKILLS" "$rel"
+      else
+        copy_file "$CURRENT/$rel" "$(local_abs "$rel")" || { warn "写入本机失败: $rel"; return 1; }
+      fi
+      case "$rel" in profile/package.json|profile/pnpm-lock.yaml|profile/pnpm-workspace.yaml) need_install=1 ;; esac
+      applied=$((applied + 1))
+    fi
+  done < "$STATUS_FILE"
+
+  while IFS=$'\t' read -r rel st l r b; do
+    [ -n "$rel" ] || continue
+    if [ "$st" = "remote" ] || { [ "$st" = "conflict" ] && [ "$force" -eq 1 ]; }; then
+      if [ "$r" = "-" ]; then
+        rm -f "$BASE/$rel"
+        prune_empty_skill_dirs "$BASE" "$rel"
+      else
+        set_base_from_cloud "$rel"
+      fi
+    fi
+  done < "$STATUS_FILE"
+  reconcile_same_rows
+
+  write_state "$REMOTE_GEN" "pull"
+  [ -d "$PROFILE/node_modules" ] || need_install=1
+
+  if [ "$REMOTE_DSH" != "$(app_version)" ] && [ "$REMOTE_DSH" != "-" ]; then
+    warn "云端设置来自 DSH ${REMOTE_DSH}，本机是 $(app_version)；插件可能需要更新。"
+  fi
+  install_if_needed "$need_install" "$noinstall"
+
+  log "已应用 $applied 个云端改动（第 $REMOTE_GEN 代，来自 ${REMOTE_MACHINE}）。"
+  log "本机改动前状态已备份到 ${BACKUPS}。"
+  log "如果界面没有变化，重启一次 DSH。"
+}
+cmd_diff() {
+  require_profile
+  [ -f "$CURRENT/manifest.tsv" ] || die "云端还没有同步包。"
+  ensure_cloud_complete || die "云端文件不完整（iCloud 可能还没下载完）。"
+  collect_base_hashes "$TMP/base-h"
+  collect_local_hashes "$TMP/local-h"
+  collect_cloud_hashes "$TMP/cloud-h"
+  build_status "$TMP/base-h" "$TMP/local-h" "$TMP/cloud-h" "$TMP/status"
+  STATUS_FILE="$TMP/status"
+
+  local rel st l r b shown=0 basef lf rf
+  while IFS=$'\t' read -r rel st l r b; do
+    [ -n "$rel" ] || continue
+    case "$st" in local|remote|conflict) ;; *) continue ;; esac
+    shown=$((shown + 1))
+    printf '\n=== %s  [%s] ===\n' "$rel" "$(status_label "$st" "$l" "$r")"
+    basef="$BASE/$rel"
+    [ -f "$basef" ] || basef="/dev/null"
+    lf=$(local_abs "$rel") || lf="/dev/null"
+    rf="$CURRENT/$rel"
+    if [ "$l" != "-" ] && [ -f "$lf" ]; then
+      printf -- '--- 本地 vs 上次同步 ---\n'
+      diff -u "$basef" "$lf" || true
+    fi
+    if [ "$r" != "-" ] && [ -f "$rf" ]; then
+      printf -- '--- 云端 vs 上次同步 ---\n'
+      diff -u "$basef" "$rf" || true
+    fi
+  done < "$STATUS_FILE"
+  [ "$shown" -eq 0 ] && log "没有差异。"
+}
+
+cmd_status() {
+  require_profile
+  load_state
+  if [ ! -f "$CURRENT/manifest.tsv" ]; then
+    if [ "$STATE_LOADED" -eq 1 ]; then
+      log "本机已接入，但云端同步包不见了：$CURRENT/manifest.tsv"
+    else
+      log "云端还没有同步包。在这台 Mac 上运行: dsh-sync init"
+    fi
+    return 0
+  fi
+
+  ensure_cloud_complete || die "云端文件不完整（iCloud 可能还没下载完）。请稍后重试。"
+  read_manifest_meta
+
+  printf 'DSH iCloud 同步状态\n'
+  printf '  本机:     %s\n' "$MACHINE"
+  printf '  云目录:   %s\n' "$CLOUD"
+  printf '  云端版本: 第 %s 代，%s 于 %s 发布（DSH %s）\n' "$REMOTE_GEN" "$REMOTE_MACHINE" "$REMOTE_UPDATED" "$REMOTE_DSH"
+  if [ "$STATE_LOADED" -eq 1 ]; then
+    printf '  上次同步: 第 %s 代（%s）\n' "$STATE_GEN" "$(state_get lastSyncAt)"
+  else
+    printf '  上次同步: 尚未接入（运行 dsh-sync pull）\n'
+  fi
+  printf '\n'
+
+  collect_base_hashes "$TMP/base-h"
+  collect_local_hashes "$TMP/local-h"
+  collect_cloud_hashes "$TMP/cloud-h"
+  build_status "$TMP/base-h" "$TMP/local-h" "$TMP/cloud-h" "$TMP/status"
+  STATUS_FILE="$TMP/status"
+
+  printf -- '%-46s %-9s %-9s %s\n' "文件" "本地" "云端" "状态"
+  printf -- '%-46s %-9s %-9s %s\n' "----------------------------------------------" "--------" "--------" "----"
+  local rel st l r b
+  while IFS=$'\t' read -r rel st l r b; do
+    [ -n "$rel" ] || continue
+    printf -- '%-46.46s %-9s %-9s %s\n' "$rel" "$(short_hash "$l")" "$(short_hash "$r")" "$(status_label "$st" "$l" "$r")"
+  done < "$STATUS_FILE"
+
+  local n_conf n_local n_remote
+  n_conf=$(count_status conflict); n_local=$(count_status local); n_remote=$(count_status remote)
+  printf '\n'
+  if [ "$n_conf" -gt 0 ]; then
+    printf '冲突 %s 个：先 dsh-sync diff，再决定 push/pull --force\n' "$n_conf"; return 2
+  elif [ "$n_local" -gt 0 ] && [ "$n_remote" -gt 0 ]; then
+    printf '本地改动 %s 个，云端改动 %s 个：可先 pull 合并，再 push\n' "$n_local" "$n_remote"
+  elif [ "$n_local" -gt 0 ]; then
+    printf '本地改动 %s 个：dsh-sync push\n' "$n_local"
+  elif [ "$n_remote" -gt 0 ]; then
+    printf '云端改动 %s 个：dsh-sync pull\n' "$n_remote"
+  else
+    printf '已同步。\n'
+  fi
+  return 0
+}
+
+cmd_agent() {
+  local action="${1:-status}"
+  local plist="$HOME/Library/LaunchAgents/com.dsh.icloud-sync.plist"
+  local target="${DSH_SYNC_BIN:-$HOME/.local/bin/dsh-sync}"
+  local uid
+  uid=$(id -u)
+
+  case "$action" in
+    on)
+      if [ "$SCRIPT_PATH" != "$target" ]; then
+        mkdir -p "$(dirname "$target")" || die "无法创建 $(dirname "$target")"
+        cp "$SCRIPT_PATH" "$target" || die "无法复制脚本到 $target"
+        chmod 755 "$target"
+        log "脚本已复制到 $target"
+      fi
+      mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs" || die "无法创建目录"
+      cat > "$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.dsh.icloud-sync</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>$target</string>
+    <string>sync</string>
+    <string>--quiet</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>ThrottleInterval</key>
+  <integer>60</integer>
+  <key>StandardOutPath</key>
+  <string>$HOME/Library/Logs/dsh-sync.log</string>
+  <key>StandardErrorPath</key>
+  <string>$HOME/Library/Logs/dsh-sync.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
+EOF
+      plutil -lint "$plist" >/dev/null || die "LaunchAgent plist 格式错误"
+      launchctl bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
+      if ! launchctl bootstrap "gui/$uid" "$plist" >/dev/null 2>&1; then
+        launchctl unload "$plist" >/dev/null 2>&1 || true
+        launchctl load -w "$plist" >/dev/null 2>&1 || die "launchctl 加载失败"
+      fi
+      log "已开启后台同步：登录时 + 每 15 分钟（DSH 运行时只上传，不下载）。"
+      log "日志：$HOME/Library/Logs/dsh-sync.log"
+      ;;
+    off)
+      launchctl bootout "gui/$uid" "$plist" >/dev/null 2>&1 || true
+      launchctl unload "$plist" >/dev/null 2>&1 || true
+      rm -f "$plist"
+      log "已关闭后台同步。"
+      ;;
+    status)
+      if launchctl print "gui/$uid/com.dsh.icloud-sync" >/dev/null 2>&1; then
+        printf '后台同步：已开启\n'
+        launchctl print "gui/$uid/com.dsh.icloud-sync" 2>/dev/null | grep -E 'state =|program =|last exit code' | head -5
+      else
+        printf '后台同步：未开启（dsh-sync agent on）\n'
+      fi
+      ;;
+    *) die "用法: dsh-sync agent on|off|status" ;;
+  esac
+}
+
+cmd_doctor() {
+  printf 'DSH iCloud 同步诊断\n'
+  printf '  脚本版本: %s\n' "$VERSION"
+  printf '  iCloud:   %s %s\n' "$ICLOUD_ROOT" "$([ -d "$ICLOUD_ROOT" ] && printf '存在' || printf '缺失')"
+  printf '  云目录:   %s %s\n' "$CLOUD" "$([ -d "$CLOUD" ] && printf '存在' || printf '缺失')"
+  printf '  本机配置: %s %s\n' "$PROFILE" "$([ -d "$PROFILE" ] && printf '存在' || printf '缺失')"
+  printf '  DSH:      %s（%s）\n' "$(app_version)" "$(is_dsh_running && printf '运行中' || printf '未运行')"
+  printf '  插件目录: %s\n' "$([ -d "$PROFILE/node_modules" ] && printf '已安装' || printf '缺失，需要 pnpm install')"
+
+  if [ ! -d "$CLOUD" ]; then
+    printf '  云端写入: 尚未创建（init 后检查）\n'
+  elif touch "$CLOUD/.dsh-sync-write-test.$$" 2>/dev/null; then
+    rm -f "$CLOUD/.dsh-sync-write-test.$$"; printf '  云端写入: 正常\n'
+  else
+    printf '  云端写入: 失败（检查 iCloud 权限/空间）\n'
+  fi
+
+  load_state
+  if [ -f "$CURRENT/manifest.tsv" ]; then
+    read_manifest_meta
+    printf '  云端版本: 第 %s 代，%s 于 %s（DSH %s）\n' "$REMOTE_GEN" "$REMOTE_MACHINE" "$REMOTE_UPDATED" "$REMOTE_DSH"
+    printf '  本机状态: %s\n' "$([ "$STATE_LOADED" -eq 1 ] && printf "已接入，上次第 $STATE_GEN 代" || printf '未接入')"
+    printf '  文件数:   %s\n' "$(manifest_get fileCount)"
+
+    local bad=0 rel exp act
+    list_manifest_rels > "$TMP/d-rels"
+    while IFS= read -r rel; do
+      [ -n "$rel" ] || continue
+      if [ ! -f "$CURRENT/$rel" ]; then
+        printf '  [缺失] %s\n' "$rel"; bad=$((bad + 1)); continue
+      fi
+      exp=$(awk -F'\t' -v r="$rel" '$1=="file" && $2==r { print $3; exit }' "$CURRENT/manifest.tsv")
+      act=$(hash_file "$CURRENT/$rel")
+      if [ "$exp" != "$act" ]; then printf '  [哈希不一致] %s\n' "$rel"; bad=$((bad + 1)); fi
+    done < "$TMP/d-rels"
+    [ "$bad" -eq 0 ] && printf '  manifest: 一致\n'
+
+    local conflicts
+    conflicts=$(find "$CURRENT" -type f \( -name '* [0-9].*' -o -name '* [0-9]' -o -name '*conflict*' \) -print 2>/dev/null)
+    if [ -n "$conflicts" ]; then
+      printf '  iCloud 冲突副本:\n'; printf '%s\n' "$conflicts" | sed 's/^/    /'
+    else
+      printf '  iCloud 冲突副本: 无\n'
+    fi
+  else
+    printf '  云端版本: 尚未创建\n'
+  fi
+
+  if [ -f "$PROFILE/package.json" ] && grep -Eq '"(file|link):' "$PROFILE/package.json" 2>/dev/null; then
+    printf '  注意: package.json 含本地 file:/link: 依赖，另一台 Mac 可能装不上。\n'
+  fi
+  printf '\n建议：两台 Mac 使用相同 DSH 版本；插件在各自机器上安装，不要同步 node_modules。\n'
+}
+
+cmd_init() {
+  acquire_lock || die "另一个 dsh-sync 正在运行（pid $(cat "$LOCK/pid" 2>/dev/null || printf '?')）。"
+  do_init
+}
+
+cmd_push() {
+  acquire_lock || die "另一个 dsh-sync 正在运行。"
+  do_push "$FORCE" "$DRY"
+  exit $?
+}
+
+cmd_pull() {
+  acquire_lock || die "另一个 dsh-sync 正在运行。"
+  do_pull "$FORCE" "$DRY" "$NO_INSTALL"
+  exit $?
+}
+
+cmd_sync() {
+  acquire_lock || die "另一个 dsh-sync 正在运行。"
+  local rc=0
+  if [ ! -f "$STATE" ]; then
+    if [ -f "$CURRENT/manifest.tsv" ]; then
+      if is_dsh_running && [ "${DSH_SYNC_LIVE_PULL:-0}" != "1" ]; then
+        warn "本机尚未接入，且 DSH 正在运行；退出 DSH 后运行 dsh-sync pull。"
+        notify "DSH 设置等待首次接入，请退出 DSH 后运行 dsh-sync pull"
+        return 2
+      fi
+      do_pull 0 0 "$NO_INSTALL"; rc=$?
+    else
+      warn "云端还没有同步包。先在一台 Mac 上运行: dsh-sync init"
+      return 3
+    fi
+  else
+    if ! is_dsh_running || [ "${DSH_SYNC_LIVE_PULL:-0}" = "1" ]; then
+      do_pull 0 0 "$NO_INSTALL"; rc=$?
+      if [ "$rc" -eq 2 ]; then notify "DSH 设置冲突，请运行 dsh-sync diff 处理"; return 2; fi
+      [ "$rc" -ne 0 ] && return "$rc"
+    fi
+    do_push 0 0; rc=$?
+    if [ "$rc" -eq 2 ]; then notify "DSH 设置冲突，请运行 dsh-sync diff 处理"; fi
+  fi
+  return "$rc"
+}
+
+cmd_install_plugins() { require_profile; install_plugins; }
+
+cmd_open() {
+  [ -d "$CLOUD" ] || die "云目录还不存在：$CLOUD"
+  open "$CLOUD"
+}
+
+main() {
+  local cmd
+  cmd="${1:-status}"
+  if [ "$#" -gt 0 ]; then shift; fi
+  if [ "$cmd" = "agent" ]; then
+    AGENT_ACTION="${1:-status}"
+    if [ "$#" -gt 0 ]; then shift; fi
+  fi
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --force|-f)  FORCE=1 ;;
+      --dry-run|-n) DRY=1 ;;
+      --no-install) NO_INSTALL=1 ;;
+      --quiet|-q)  QUIET=1 ;;
+      --help|-h)   usage; exit 0 ;;
+      *) die "未知参数: $1" ;;
+    esac
+    shift
+  done
+
+  TMP=$(mktemp -d "${TMPDIR:-/tmp}/dsh-sync.XXXXXX") || die "无法创建临时目录"
+
+  case "$cmd" in
+    init)            cmd_init ;;
+    status)          cmd_status ;;
+    push)            cmd_push ;;
+    pull)            cmd_pull ;;
+    sync)            cmd_sync; exit $? ;;
+    diff)            cmd_diff ;;
+    install-plugins) cmd_install_plugins ;;
+    agent)           cmd_agent "$AGENT_ACTION" ;;
+    doctor)          cmd_doctor ;;
+    open)            cmd_open ;;
+    version|-V)      printf 'dsh-sync %s\n' "$VERSION" ;;
+    help)            usage ;;
+    *)               die "未知命令: ${cmd}（运行 dsh-sync --help）" ;;
+  esac
+}
+
+main "$@"

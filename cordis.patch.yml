@@ -1,0 +1,4 @@
+# dsh-icloud-sync: host routes for the iCloud sync settings section.
+- insert:
+    - id: dsh-icloud-sync
+      name: 'dsh-icloud-sync'

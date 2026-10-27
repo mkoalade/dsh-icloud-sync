@@ -1,0 +1,59 @@
+{
+  "name": "dsh-icloud-sync",
+  "version": "1.0.0",
+  "description": "Sync DSH profiles, plugin manifests, and skills between Macs through iCloud Drive, with a settings panel and a bundled dsh-sync CLI.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mkoalade/dsh-icloud-sync.git"
+  },
+  "homepage": "https://github.com/mkoalade/dsh-icloud-sync#readme",
+  "bugs": {
+    "url": "https://github.com/mkoalade/dsh-icloud-sync/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "icloud",
+    "sync",
+    "macos"
+  ],
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "bin/dsh-sync",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    },
+    "icon": "./icon.svg"
+  }
+}
