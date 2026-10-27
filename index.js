@@ -6,12 +6,14 @@
  * no terminal step and no PATH setup. Environment and config can still point at
  * another copy of the script.
  */
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { createCloudSessions } from "./lib/cloud-sessions.js";
+import { ensureCodexTabSupport } from "./lib/codex-sidebar-tab.js";
 
 const execFileAsync = promisify(execFile);
 const PACKAGE_DIR = dirname(fileURLToPath(import.meta.url));
@@ -21,7 +23,17 @@ const DEFAULT_CLOUD = join(homedir(), "Library", "Mobile Documents", "com~apple~
 const CLOUD_SCRIPT = join(DEFAULT_CLOUD, "bin", "dsh-sync");
 const STATE_FILE = join(homedir(), ".dsh", ".icloud-sync", "state.tsv");
 const MAX_BUFFER = 4 * 1024 * 1024;
+/** 只跑一次的 codex-ui 页签补丁结果，供 /cloud 与设置面板显示。 */
+const codexTabPatch = { attempted: false, status: "pending" };
 const HEADER = "x-dsh-icloud-sync";
+
+/** DSH data root; DSH_SYNC_ROOT exists so tests can point at a scratch directory. */
+const DSH_ROOT = (process.env.DSH_SYNC_ROOT || "").trim() !== "" ? process.env.DSH_SYNC_ROOT.trim() : join(homedir(), ".dsh");
+const SESSIONS_DIR = join(DSH_ROOT, "sessions");
+const ATTACHMENTS_DIR = join(DSH_ROOT, "attachments");
+const SESSION_STATE_DIR = join(DSH_ROOT, ".icloud-sync");
+const SESSION_CLOUD = (process.env.DSH_SYNC_CLOUD || "").trim() !== "" ? process.env.DSH_SYNC_CLOUD.trim() : DEFAULT_CLOUD;
+const QUIET_MS = 20000;
 
 const ACTIONS = new Map([
   ["sync", { args: ["sync"], timeout: 300000 }],
@@ -290,12 +302,113 @@ function installCli() {
   }
 }
 
+let machineInfo = null;
+
+/** Stable per-Mac identity for conflict copies and "which Mac wrote this" labels. */
+function machineIdentity() {
+  if (machineInfo !== null) return machineInfo;
+  let id = "";
+  try {
+    const out = execFileSync("/usr/sbin/ioreg", ["-rd1", "-c", "IOPlatformExpertDevice"], {
+      encoding: "utf8",
+      timeout: 4000,
+      maxBuffer: 1024 * 1024
+    });
+    const match = out.match(/"IOPlatformUUID"\s*=\s*"([^"]+)"/);
+    if (match !== null) id = match[1];
+  } catch {
+    id = "";
+  }
+  machineInfo = { name: hostname(), id };
+  return machineInfo;
+}
+
+/** Ask iCloud to fetch a not-yet-materialised file. Best effort: retried next pass. */
+function materializeIcloudFile(path) {
+  try {
+    execFileSync("/usr/bin/brctl", ["download", path], { encoding: "utf8", timeout: 20000, maxBuffer: 1024 * 1024 });
+  } catch {
+    // Offline, or brctl unavailable: the panel keeps showing "等待 iCloud 下载".
+  }
+}
+
+function createSessionEngine() {
+  const machine = machineIdentity();
+  return createCloudSessions({
+    sessionsDir: SESSIONS_DIR,
+    attachmentsDir: ATTACHMENTS_DIR,
+    cloudDir: SESSION_CLOUD,
+    stateDir: SESSION_STATE_DIR,
+    machineName: machine.name,
+    machineId: machine.id,
+    quietMs: QUIET_MS,
+    materialize: materializeIcloudFile
+  });
+}
+
+/** Session ids that are open in this host process; those are never overwritten. */
+function liveSessionIds(hostCtx) {
+  const ids = new Set();
+  const stores = [];
+  try {
+    if (hostCtx.sessions !== undefined && hostCtx.sessions !== null) stores.push(hostCtx.sessions);
+  } catch {
+    // service not mounted
+  }
+  try {
+    const viaGet = typeof hostCtx.get === "function" ? hostCtx.get("sessions") : undefined;
+    if (viaGet !== undefined && viaGet !== null) stores.push(viaGet);
+  } catch {
+    // service not mounted
+  }
+  for (const store of stores) {
+    try {
+      const list = typeof store.list === "function" ? store.list() : [];
+      for (const item of list || []) {
+        if (item !== null && item !== undefined && typeof item.id === "string") ids.add(item.id);
+      }
+    } catch {
+      // ignore
+    }
+  }
+  return ids;
+}
+
+function sessionSnapshot(hostCtx, engine) {
+  const state = engine.collect(liveSessionIds(hostCtx));
+  return {
+    ok: true,
+    at: new Date().toISOString(),
+    machine: { name: engine.machineName, id: engine.machineId, slug: engine.machineSlug },
+    cloudDir: SESSION_CLOUD,
+    cloudExists: existsSync(SESSION_CLOUD),
+    sessionsDir: SESSIONS_DIR,
+    quietMs: QUIET_MS,
+    summary: engine.summaryOf(state.sessions),
+    sessions: state.sessions
+  };
+}
+
 /** Settings -> Integrations section: status plus a fixed allowlist of dsh-sync actions. */
 export function apply(ctx, config) {
   const autoPull = { lastAttempt: null, lastExitCode: null };
 
   ctx.inject(["webServer"], (hostCtx) => {
     const disposers = [];
+    const sessionEngine = createSessionEngine();
+
+    if (!codexTabPatch.attempted) {
+      codexTabPatch.attempted = true;
+      try {
+        Object.assign(codexTabPatch, ensureCodexTabSupport({}));
+      } catch (error) {
+        codexTabPatch.status = "error";
+        codexTabPatch.reason = error instanceof Error ? error.message : String(error);
+      }
+      if (codexTabPatch.status === "skipped") {
+        console.warn("[dsh-icloud-sync] codex-ui 页签补丁未应用：" + codexTabPatch.reason);
+      }
+    }
 
     disposers.push(hostCtx.webServer.register({
       kind: "exact",
@@ -367,6 +480,78 @@ export function apply(ctx, config) {
       }
     }));
 
+    disposers.push(hostCtx.webServer.register({
+      kind: "exact",
+      path: "/dsh-icloud-sync/cloud",
+      handler: (request, response) => {
+        if (request.method !== "GET") {
+          sendJson(response, 405, { ok: false, error: "只支持 GET" });
+          return;
+        }
+        if (!loopback(request) || !sameOrigin(request)) {
+          sendJson(response, 403, { ok: false, error: "只允许本机同源访问" });
+          return;
+        }
+        try {
+          sendJson(response, 200, Object.assign(sessionSnapshot(hostCtx, sessionEngine), { codexTab: codexTabPatch }));
+        } catch (error) {
+          sendJson(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    }));
+
+    disposers.push(hostCtx.webServer.register({
+      kind: "exact",
+      path: "/dsh-icloud-sync/cloud/action",
+      handler: async (request, response) => {
+        if (request.method !== "POST") {
+          sendJson(response, 405, { ok: false, error: "只支持 POST" });
+          return;
+        }
+        if (!loopback(request) || !sameOrigin(request)) {
+          sendJson(response, 403, { ok: false, error: "只允许本机同源访问" });
+          return;
+        }
+        if (request.headers[HEADER] !== "1") {
+          sendJson(response, 403, { ok: false, error: "缺少请求标记" });
+          return;
+        }
+        try {
+          const body = await readJson(request);
+          const action = typeof body.action === "string" ? body.action : "";
+          if (action === "sync") {
+            const report = sessionEngine.run(liveSessionIds(hostCtx));
+            sendJson(response, 200, { ok: true, action, report, snapshot: sessionSnapshot(hostCtx, sessionEngine) });
+            return;
+          }
+          if (action === "import") {
+            const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+            if (!/^session-[A-Za-z0-9._-]+$/.test(sessionId)) {
+              sendJson(response, 400, { ok: false, error: "会话 id 不合法" });
+              return;
+            }
+            const result = sessionEngine.importById(sessionId);
+            sendJson(response, 200, Object.assign({ action }, result, { snapshot: sessionSnapshot(hostCtx, sessionEngine) }));
+            return;
+          }
+          if (action === "resolve") {
+            const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+            const keep = body.keep === "local" || body.keep === "cloud" ? body.keep : "";
+            if (!/^session-[A-Za-z0-9._-]+$/.test(sessionId) || keep === "") {
+              sendJson(response, 400, { ok: false, error: "参数不完整" });
+              return;
+            }
+            const result = sessionEngine.resolve(sessionId, keep);
+            sendJson(response, 200, Object.assign({ action }, result, { snapshot: sessionSnapshot(hostCtx, sessionEngine) }));
+            return;
+          }
+          sendJson(response, 400, { ok: false, error: "未知操作" });
+        } catch (error) {
+          sendJson(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+    }));
+
     // Optional one-shot bootstrap: a new Mac with an initialized cloud bundle joins
     // automatically instead of waiting for a click. Off unless configured.
     if (config !== null && config !== undefined && config.autoPull === true) {
@@ -388,6 +573,27 @@ export function apply(ctx, config) {
       if (typeof timer.unref === "function") timer.unref();
       disposers.push(() => clearTimeout(timer));
     }
+
+    // Session sync pass: upload quiet changes, import cloud-only sessions, record
+    // conflicts. Runs on a timer so the tab is fresh without opening Settings.
+    let sessionRunActive = false;
+    const runSessionPass = () => {
+      if (sessionRunActive) return;
+      sessionRunActive = true;
+      try {
+        sessionEngine.run(liveSessionIds(hostCtx));
+      } catch {
+        // A sync pass must never take the host down.
+      } finally {
+        sessionRunActive = false;
+      }
+    };
+    const warmTimer = setTimeout(runSessionPass, 8000);
+    if (typeof warmTimer.unref === "function") warmTimer.unref();
+    disposers.push(() => clearTimeout(warmTimer));
+    const sessionTimer = setInterval(runSessionPass, 60000);
+    if (typeof sessionTimer.unref === "function") sessionTimer.unref();
+    disposers.push(() => clearInterval(sessionTimer));
 
     return () => {
       for (const dispose of disposers.reverse()) {

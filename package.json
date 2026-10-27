@@ -1,7 +1,7 @@
 {
   "name": "dsh-icloud-sync",
-  "version": "1.0.0",
-  "description": "Sync DSH profiles, plugin manifests, and skills between Macs through iCloud Drive, with a settings panel and a bundled dsh-sync CLI.",
+  "version": "1.1.0",
+  "description": "Sync DSH profiles, plugin manifests, skills, and session histories between Macs through iCloud Drive, with a settings panel, a cloud sessions tab, and a bundled dsh-sync CLI.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -17,6 +17,7 @@
     "dsh-plugin",
     "deepseek-harness",
     "icloud",
+    "sessions",
     "sync",
     "macos"
   ],
@@ -36,6 +37,7 @@
   "files": [
     "index.js",
     "client.js",
+    "lib/*.js",
     "cordis.patch.yml",
     "bin/dsh-sync",
     "locale/*.json",

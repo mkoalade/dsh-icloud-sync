@@ -716,7 +716,7 @@ window.__ModuleLoader__.load({
 
               h(Card, {
                 title: "同步的文件",
-                desc: "只同步配置、插件清单和 Skills",
+                desc: "配置、插件清单、Skills 与全部会话",
                 right: h("span", { style: S.count }, data.files.length + " 个")
               },
                 data.files.length === 0
@@ -745,10 +745,275 @@ window.__ModuleLoader__.load({
                         : null)),
 
               h("p", { style: S.footer },
-                "同步范围：profile 配置、插件清单与 Skills；不包含 node_modules、会话记录和密钥。",
+                "同步范围：profile 配置、插件清单、Skills 与全部会话（含附件）；不包含 node_modules 与密钥。",
                 h("br"),
                 "遇到冲突时界面不会强行覆盖；请在终端运行 dsh-sync diff，再决定 push 或 pull 的方向。"))
           : null);
+    }
+
+
+    const CS = {
+      panel: {
+        display: "flex",
+        flexDirection: "column",
+        minHeight: 0,
+        height: "100%",
+        padding: "10px 12px 16px",
+        color: "var(--dsw-alias-label-primary)",
+        fontSize: 12.5,
+        lineHeight: 1.5
+      },
+      head: { display: "flex", alignItems: "center", gap: 6, marginBottom: 8, flex: "none" },
+      headTitle: { fontSize: 13, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+      chips: { display: "flex", flexWrap: "wrap", gap: 5, marginBottom: 8, flex: "none" },
+      list: { display: "flex", flexDirection: "column", gap: 6, overflowY: "auto", minHeight: 0, flex: "1 1 auto", paddingRight: 2 },
+      row: {
+        background: "var(--dsw-alias-bg-layer-1)",
+        border: "1px solid var(--dsw-alias-border-l2)",
+        borderRadius: 10,
+        padding: "8px 10px",
+        display: "flex",
+        gap: 8,
+        alignItems: "flex-start"
+      },
+      rowMain: { minWidth: 0, flex: "1 1 auto", display: "flex", flexDirection: "column", gap: 2 },
+      rowTitle: { fontSize: 12.5, fontWeight: 550, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+      rowMeta: { color: "var(--dsw-alias-label-tertiary)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+      rowOps: { display: "flex", gap: 4, alignItems: "center", flex: "none", flexWrap: "wrap", justifyContent: "flex-end" },
+      mini: {
+        fontSize: 11,
+        padding: "2px 8px",
+        borderRadius: 999,
+        border: "1px solid var(--dsw-alias-border-l1)",
+        background: "transparent",
+        color: "var(--dsw-alias-label-secondary)",
+        cursor: "pointer",
+        fontFamily: "inherit"
+      },
+      note: { color: "var(--dsw-alias-label-tertiary)", fontSize: 11.5, marginTop: 6, flex: "none" },
+      empty: { color: "var(--dsw-alias-label-tertiary)", fontSize: 12, padding: "28px 8px", textAlign: "center" },
+      footer: { color: "var(--dsw-alias-label-caption)", fontSize: 10.5, marginTop: 8, flex: "none", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }
+    };
+
+    const SESSION_STATUS = {
+      synced: { label: "已同步", tone: "success" },
+      "local-only": { label: "待上传", tone: "info" },
+      "local-newer": { label: "待上传", tone: "info" },
+      "cloud-newer": { label: "待下载", tone: "warn" },
+      "pending-close": { label: "待关闭会话", tone: "warn" },
+      "cloud-only": { label: "仅云端", tone: "info" },
+      "cloud-offline": { label: "iCloud 下载中", tone: "neutral" },
+      conflict: { label: "冲突", tone: "warn" }
+    };
+
+    function formatBytes(size) {
+      const value = Number(size) || 0;
+      if (value < 1024) return value + " B";
+      if (value < 1024 * 1024) return (value / 1024).toFixed(1) + " KB";
+      return (value / (1024 * 1024)).toFixed(1) + " MB";
+    }
+
+    function shortPath(cwd) {
+      if (typeof cwd !== "string" || cwd === "") return "路径未知";
+      return cwd.replace(/^\/Users\/[^/]+/, "~");
+    }
+
+    function syncNote(actions) {
+      const counts = {};
+      for (const item of actions || []) {
+        if (item === null || item === undefined) continue;
+        const key = item.action;
+        counts[key] = (counts[key] || 0) + 1;
+      }
+      const labels = { upload: "上传", import: "导入", download: "下载", conflict: "冲突", defer: "暂缓", error: "出错", "upload-attachment": "附件上传", "download-attachment": "附件下载" };
+      const parts = [];
+      for (const key of Object.keys(counts)) {
+        const label = labels[key] || key;
+        parts.push(label + " " + counts[key]);
+      }
+      return parts.length === 0 ? "本轮没有需要同步的改动。" : parts.join(" · ");
+    }
+
+    function CloudSessionsPanel(props) {
+      const [state, setState] = React.useState({ loading: true, error: null, data: null });
+      const [busy, setBusy] = React.useState("");
+      const [note, setNote] = React.useState("");
+
+      const load = React.useCallback(function () {
+        return fetch(API + "/cloud", { cache: "no-store", credentials: "same-origin", headers: { accept: "application/json" } })
+          .then(function (response) {
+            return response.json().then(function (data) {
+              if (!response.ok || data === null || data.ok === false) {
+                throw new Error(data && data.error ? data.error : "HTTP " + response.status);
+              }
+              setState({ loading: false, error: null, data: data });
+            });
+          })
+          .catch(function (error) {
+            setState({ loading: false, error: error instanceof Error ? error.message : String(error), data: null });
+          });
+      }, []);
+
+      React.useEffect(function () {
+        ensureStyles();
+        void load();
+        const timer = setInterval(function () {
+          if (typeof document !== "undefined" && document.visibilityState === "hidden") return;
+          void load();
+        }, 15000);
+        return function () { clearInterval(timer); };
+      }, [load]);
+
+      const act = React.useCallback(function (action, payload, done) {
+        const tag = action + (payload && payload.sessionId ? ":" + payload.sessionId : "");
+        setBusy(tag);
+        setNote("");
+        fetch(API + "/cloud/action", {
+          method: "POST",
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json", "x-dsh-icloud-sync": "1" },
+          body: JSON.stringify(Object.assign({ action: action }, payload || {}))
+        })
+          .then(function (response) {
+            return response.json().then(function (data) {
+              if (!response.ok || data === null || data.ok === false) {
+                throw new Error(data && data.error ? data.error : "HTTP " + response.status);
+              }
+              if (data.snapshot) {
+                setState({ loading: false, error: null, data: data.snapshot });
+              }
+              if (action === "sync" && data.report) setNote(syncNote(data.report.actions));
+              if (action === "import" && data.skipped) setNote("本机已有这个会话。");
+              if (typeof done === "function") done(data);
+            });
+          })
+          .catch(function (error) {
+            setNote(error instanceof Error ? error.message : String(error));
+          })
+          .finally(function () { setBusy(""); });
+      }, []);
+
+      const openSession = React.useCallback(function (sessionId) {
+        if (typeof props.openSession === "function") {
+          try { props.openSession(sessionId); return; } catch { /* fall through */ }
+        }
+        setNote("当前页面无法切换会话，请在任务列表里打开。");
+      }, [props.openSession]);
+
+      const data = state.data;
+      const sessions = data !== null && Array.isArray(data.sessions) ? data.sessions : [];
+      const summary = data !== null && data.summary ? data.summary : null;
+
+      function row(session) {
+        const status = SESSION_STATUS[session.status] || { label: String(session.status), tone: "neutral" };
+        const meta = [shortPath(session.cwd)];
+        if (session.updatedAt) meta.push(formatTime(session.updatedAt));
+        if (session.size) meta.push(formatBytes(session.size));
+        if (session.machine) meta.push(session.machine);
+        const ops = [];
+        if (session.status === "cloud-only") {
+          ops.push(h("button", {
+            type: "button",
+            style: CS.mini,
+            disabled: busy !== "",
+            onClick: function () {
+              act("import", { sessionId: session.id }, function () {
+                if (typeof props.refreshSessions === "function") props.refreshSessions();
+                setTimeout(function () { openSession(session.id); }, 350);
+              });
+            }
+          }, "导入"));
+        }
+        if (session.status === "conflict") {
+          ops.push(h("button", {
+            type: "button",
+            style: CS.mini,
+            disabled: busy !== "",
+            title: "保留本机版本，覆盖云端",
+            onClick: function () { act("resolve", { sessionId: session.id, keep: "local" }, function () { void load(); }); }
+          }, "保留本机"));
+          ops.push(h("button", {
+            type: "button",
+            style: CS.mini,
+            disabled: busy !== "",
+            title: "用云端版本覆盖本机（本机旧版会备份）",
+            onClick: function () { act("resolve", { sessionId: session.id, keep: "cloud" }, function () { void load(); }); }
+          }, "保留云端"));
+        }
+        if (session.localPath && session.status !== "cloud-only" && session.status !== "cloud-offline") {
+          ops.push(h("button", {
+            type: "button",
+            style: CS.mini,
+            disabled: busy !== "",
+            onClick: function () { openSession(session.id); }
+          }, "打开"));
+        }
+        return h("div", { key: session.id, style: CS.row },
+          h("div", { style: CS.rowMain },
+            h("div", { style: CS.rowTitle, title: session.title }, session.title),
+            h("div", { style: CS.rowMeta, title: (session.cwd || "") + (session.machine ? " · " + session.machine : "") }, meta.join(" · "))),
+          h("div", { style: CS.rowOps },
+            h(Badge, { tone: status.tone }, status.label),
+            ops.length > 0 ? h("span", { style: { display: "inline-flex", gap: 4 } }, ops) : null));
+      }
+
+      const cloudMissing = data !== null && data.cloudExists === false;
+      let body;
+      if (state.loading && data === null) {
+        body = h("div", { style: CS.empty }, "正在读取云端会话…");
+      } else if (state.error !== null) {
+        body = h("div", { style: Object.assign({}, CS.empty, { color: "var(--dsw-alias-state-warn-label)" }) }, state.error);
+      } else if (sessions.length === 0) {
+        body = h("div", { style: CS.empty },
+          cloudMissing
+            ? "iCloud Drive 里还没有 DSH-Sync 目录。点「立即同步」创建。"
+            : "还没有会话。首次同步会把本机会话上传到云端。");
+      } else {
+        body = h("div", { style: CS.list }, sessions.map(row));
+      }
+
+      const machine = data !== null && data.machine ? data.machine.name : null;
+      return h("div", { style: CS.panel },
+        h("div", { style: CS.head },
+          h("div", { style: CS.headTitle, title: machine ? "本机：" + machine : null }, "云端"),
+          h("div", { style: { flex: "1 1 auto" } }),
+          h(Button, { onClick: function () { void load(); }, disabled: busy !== "", title: "刷新列表" }, "刷新"),
+          h(Button, {
+            variant: "primary",
+            onClick: function () { act("sync"); },
+            busy: busy === "sync",
+            disabled: busy !== "" || cloudMissing
+          }, "立即同步")),
+        summary !== null
+          ? h("div", { style: CS.chips },
+              h(Badge, { tone: "success" }, "已同步 " + summary.synced),
+              h(Badge, { tone: "info" }, "待上传 " + summary.pendingUpload),
+              h(Badge, { tone: summary.pendingDownload > 0 ? "warn" : "neutral" }, "待下载 " + summary.pendingDownload),
+              h(Badge, { tone: summary.conflicts > 0 ? "warn" : "neutral" }, "冲突 " + summary.conflicts),
+              h(Badge, { tone: "neutral" }, "本机 " + summary.local + " · 云端 " + summary.cloud))
+          : null,
+        note !== "" ? h("div", { style: Object.assign({}, CS.note, { color: "var(--dsw-alias-label-secondary)" }) }, note) : null,
+        body,
+        data !== null
+          ? h("div", { style: CS.footer, title: data.cloudDir },
+              (machine ? machine + " · " : "") + (data.cloudDir || "").replace(/^\/Users\/[^/]+/, "~") +
+              (data.at ? " · " + formatTime(data.at) : ""))
+          : null);
+    }
+
+    /**
+     * 云端页签内容。codex-ui 打过 sidebar.cloud 补丁后，会把这里注册的组件当成
+     * 第四个伙伴页签渲染，props 带 openSession / t。
+     */
+    function makeCloudTab(bridge) {
+      return function CloudTab(props) {
+        const open = (props && (props.openSession || props.open)) || bridge.open;
+        return h(CloudSessionsPanel, {
+          openSession: open,
+          refreshSessions: bridge.refresh
+        });
+      };
     }
 
     function apply(ctx) {
@@ -761,11 +1026,44 @@ window.__ModuleLoader__.load({
           icon: "cloud"
         }, ICloudSyncSection);
       });
+
+      const bridge = {
+        open: function (sessionId) {
+          try {
+            if (ctx.uiWorkspace && typeof ctx.uiWorkspace.openSession === "function") {
+              ctx.uiWorkspace.openSession(sessionId);
+              return true;
+            }
+          } catch (error) {
+            // host without a workspace opener
+          }
+          return false;
+        },
+        refresh: function () {
+          try {
+            if (ctx.sessions && typeof ctx.sessions.refresh === "function") ctx.sessions.refresh();
+          } catch (error) {
+            // older sessions service
+          }
+        }
+      };
+      try {
+        ctx.slots.inject("sidebar.cloud", function () {
+          return ctx.slots.register({
+            name: "sidebar.cloud",
+            id: "icloud-sync-cloud",
+            order: 30,
+            label: function () { return "云端"; }
+          }, makeCloudTab(bridge));
+        });
+      } catch (error) {
+        console.warn("[dsh-icloud-sync] 云端页签挂载失败", error);
+      }
     }
 
     const module = { exports: {} };
     module.exports.apply = apply;
-    module.exports.inject = ["slots"];
+    module.exports.inject = ["slots", "sessions"];
     return module.exports;
   }
 });
