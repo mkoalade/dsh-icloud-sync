@@ -563,7 +563,7 @@ export function apply(ctx, config) {
             sendJson(response, 200, Object.assign({ action }, result, { snapshot: sessionSnapshot(hostCtx, sessionEngine, scope) }));
           } catch (error) {
             const code = error !== null && typeof error === "object" && typeof error.code === "string" ? error.code : "";
-            const status = code === "live" || code === "cloud-pending" || code === "live-empty" ? 409 : code === "missing-local" || code === "missing-cloud" ? 404 : 400;
+            const status = code === "live" || code === "cloud-pending" || code === "live-empty" || code === "archived" ? 409 : code === "missing-local" || code === "missing-cloud" ? 404 : 400;
             sendJson(response, status, { ok: false, error: error instanceof Error ? error.message : String(error) });
           }
         } catch (error) {
