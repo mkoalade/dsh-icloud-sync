@@ -27,10 +27,12 @@ app itself. Plugins reinstall from `package.json` + `pnpm-lock.yaml` on each Mac
 ## Install
 
 ```bash
-dsh plugin --profile desktop add dsh-icloud-sync
+dsh plugin --profile desktop add github:mkoalade/dsh-icloud-sync
 ```
 
-Replace `desktop` with your profile name. Restart DSH if the panel does not appear; it lives at
+The package ships straight from GitHub (`github:mkoalade/dsh-icloud-sync`), so the `github:` form
+above is the canonical one — pnpm in the profile takes git specifiers as-is. Replace `desktop` with
+your profile name. Restart DSH if the panel does not appear; it lives at
 **Settings → Integrations → iCloud 同步**.
 
 The package ships its own patch row, so installation mounts the plugin — there is no second step
@@ -137,10 +139,10 @@ MIT.
 ## 安装
 
 ```bash
-dsh plugin --profile desktop add dsh-icloud-sync
+dsh plugin --profile desktop add github:mkoalade/dsh-icloud-sync
 ```
 
-装好后打开 **设置 → 集成 → iCloud 同步**。插件自带 `cordis.patch.yml`，装包时自动挂载，不需要
+包直接从 GitHub 安装（没有发布到 npm），所以用上面的 `github:` 形式。装好后打开 **设置 → 集成 → iCloud 同步**。插件自带 `cordis.patch.yml`，装包时自动挂载，不需要
 再跑 `install.sh`，也不要求 `~/.local/bin` 里有脚本——CLI 就在包内的 `bin/dsh-sync`。
 
 ## 第一台 Mac：发布
@@ -185,12 +187,13 @@ bash "$HOME/Library/Mobile Documents/com~apple~CloudDocs/DSH-Sync/bin/dsh-sync" 
 
 ```bash
 bash scripts/release.sh <你的 GitHub 用户名>   # 写 repository 字段、生成市场提交文件、本地提交
-npm publish --access public
+git push origin main                          # 仓库只走 GitHub，不发布 npm
 ```
 
-之后按 [PUBLISH.zh.md](PUBLISH.zh.md) 建仓库、打 `dsh-plugin` topic，并把
-`submission/<owner>__dsh-icloud-sync.yml` 作为 `data/plugins/<owner>__dsh-icloud-sync.yml`
-提交到 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin)。
+用户端安装：`dsh plugin --profile desktop add github:<owner>/dsh-icloud-sync`。
+若以后想进 [awesome-dsh-plugin](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin) 的索引，
+把 `submission/<owner>__dsh-icloud-sync.yml` 作为 `data/plugins/<owner>__dsh-icloud-sync.yml` 提交
+（细节见 [PUBLISH.zh.md](PUBLISH.zh.md)）。
 
 ## 许可
 
