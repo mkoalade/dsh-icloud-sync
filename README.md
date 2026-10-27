@@ -37,6 +37,9 @@ strip (the row with 复制 / 好的回答 / 有问题的回答) carries an 上�
 as the project is not running. The **云端** tab is the iCloud side: it lists only the sessions that
 exist in iCloud and offers 下载 and 删除云端. Sessions that live only on this Mac never show up there.
 
+The same upload is also in the project's right-click menu (right-click a project in the sidebar →
+**上传项目到 iCloud**); it runs in the background and reports the result in a small toast.
+
 Rows are grouped by project, and every group header carries **上传项目** and **下载项目**:
 
 - **上传项目** uploads every session of that project this Mac has, including the ones iCloud has never
@@ -209,6 +212,8 @@ MIT.
 打开会话后，助手消息操作条（也就是「复制 / 好的回答 / 有问题的回答」那一行）最右边有「上传到
 iCloud」按钮，项目没在运行时就能点；**云端**页签是 iCloud 侧，只列出 iCloud 里真实存在的会话，
 负责「下载」和「删除云端」。只在本机、还没上传过的会话不会在这里单独成行。
+
+同样的上传也在项目右键菜单里（侧栏右键项目 → **上传项目到 iCloud**），后台执行，结果用右下角提示条汇报。
 
 行按项目分组，每组标题右侧有 **上传项目** / **下载项目**：
 

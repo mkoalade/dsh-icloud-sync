@@ -1170,6 +1170,91 @@ window.__ModuleLoader__.load({
       };
     }
 
+    /** 与 lib/cloud-sessions.js 的 encodeProjectKey 保持一致：DSH 用它把路径编码成项目键。 */
+    function projectKeyOf(cwd) {
+      const text = String(cwd || "");
+      const body = text.indexOf("/") === 0 ? text.slice(1) : text;
+      const encoded = body
+        .split("/")
+        .filter(function (part) { return part !== ""; })
+        .map(function (part) {
+          return part.replace(/[^A-Za-z0-9._-]/g, function (char) {
+            return "~" + char.codePointAt(0).toString(16).padStart(4, "0");
+          });
+        })
+        .join("-");
+      return "--" + encoded + "--";
+    }
+
+    /** 轻量提示条：项目右键菜单里点「上传项目」后给一句结果，不依赖宿主有没有 toast。 */
+    function showToast(message, tone) {
+      if (typeof document === "undefined" || !document.body) return;
+      const color = tone === "error" ? "var(--dsw-alias-state-warn-label)" : tone === "success" ? "var(--dsw-alias-state-success-label)" : "var(--dsw-alias-label-primary)";
+      const node = document.createElement("div");
+      node.setAttribute("data-dsh-icloud-toast", "1");
+      node.style.cssText = [
+        "position:fixed",
+        "right:18px",
+        "bottom:18px",
+        "max-width:360px",
+        "padding:9px 12px",
+        "border-radius:10px",
+        "background:var(--dsw-alias-bg-layer-2)",
+        "border:1px solid var(--dsw-alias-border-l2)",
+        "box-shadow:0 8px 24px rgba(0,0,0,0.18)",
+        "font-size:12.5px",
+        "line-height:1.5",
+        "color:" + color,
+        "z-index:2147483000",
+        "pointer-events:none",
+        "white-space:pre-wrap"
+      ].join(";");
+      node.textContent = String(message);
+      document.body.appendChild(node);
+      const timer = setTimeout(function () {
+        try { node.remove(); } catch (error) { /* ignore */ }
+      }, tone === "error" ? 6000 : 4000);
+      if (typeof timer === "object" && timer !== null && typeof timer.unref === "function") timer.unref();
+    }
+
+    /**
+     * codex-ui 的项目右键菜单通过 window.__dshIcloud 调到这里：把整个项目推到 iCloud。
+     * 失败/跳过都落在提示条里，云端页签照旧每 30 秒自动刷新。
+     */
+    function uploadProjectFromSidebar(cwd, title) {
+      const projectKey = projectKeyOf(cwd);
+      if (!/^[A-Za-z0-9._~-]+$/.test(projectKey)) {
+        showToast("这个项目路径无法映射成 iCloud 项目键：" + String(cwd), "error");
+        return Promise.resolve(null);
+      }
+      const label = typeof title === "string" && title !== "" ? title : String(cwd || "");
+      showToast("正在上传「" + label + "」…", "info");
+      return fetch(API + "/cloud/action", {
+        method: "POST",
+        cache: "no-store",
+        credentials: "same-origin",
+        headers: { "content-type": "application/json", "x-dsh-icloud-sync": "1" },
+        body: JSON.stringify({ action: "upload-project", projectKey: projectKey, scope: "cloud" })
+      })
+        .then(function (response) {
+          return response.json().then(function (data) {
+            if (!response.ok || data === null || data.ok === false) {
+              throw new Error(data && data.error ? data.error : "HTTP " + response.status);
+            }
+            const parts = ["已上传「" + label + "」"];
+            if (typeof data.uploaded === "number") parts.push("上传 " + data.uploaded + " 个" + (data.partial > 0 ? "（含 " + data.partial + " 个运行中会话的已落盘部分）" : ""));
+            if (Array.isArray(data.skipped) && data.skipped.length > 0) parts.push("跳过 " + data.skipped.length + " 个");
+            if (Array.isArray(data.failed) && data.failed.length > 0) parts.push("失败 " + data.failed.length + " 个");
+            showToast(parts.join("，") + "。", data.failed && data.failed.length > 0 ? "error" : "success");
+            return data;
+          });
+        })
+        .catch(function (error) {
+          showToast("上传失败：" + (error instanceof Error ? error.message : String(error)), "error");
+          return null;
+        });
+    }
+
     function apply(ctx) {
       ctx.slots.inject("settings.section", function () {
         return ctx.slots.register({
@@ -1180,6 +1265,12 @@ window.__ModuleLoader__.load({
           icon: "cloud"
         }, ICloudSyncSection);
       });
+
+      if (typeof window !== "undefined") {
+        const hub = window.__dshIcloud = window.__dshIcloud || {};
+        hub.toast = showToast;
+        hub.uploadProject = uploadProjectFromSidebar;
+      }
 
       const bridge = {
         open: function (sessionId) {
