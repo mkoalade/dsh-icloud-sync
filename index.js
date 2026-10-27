@@ -370,17 +370,32 @@ function liveSessionIds(hostCtx) {
   return ids;
 }
 
-function sessionSnapshot(hostCtx, engine) {
+function cloudSummaryOf(sessions, base) {
+  const summary = { uploaded: 0, unuploaded: 0, "cloud-newer": 0, "cloud-only": 0, live: 0, local: base.local, cloud: base.cloud };
+  for (const session of sessions) {
+    if (session.status === "uploaded") summary.uploaded += 1;
+    else if (session.status === "unuploaded") summary.unuploaded += 1;
+    else if (session.status === "cloud-newer") summary["cloud-newer"] += 1;
+    else summary["cloud-only"] += 1;
+    if (session.live) summary.live += 1;
+  }
+  return summary;
+}
+
+function sessionSnapshot(hostCtx, engine, scope) {
   const state = engine.list(liveSessionIds(hostCtx));
+  const iCloudOnly = scope === "cloud";
+  const sessions = iCloudOnly ? state.sessions.filter((session) => session.hasCloud === true) : state.sessions;
   return {
     ok: true,
+    scope: iCloudOnly ? "cloud" : "all",
     at: new Date().toISOString(),
     machine: { name: engine.machineName, id: engine.machineId, slug: engine.machineSlug },
     cloudDir: SESSION_CLOUD,
     cloudExists: state.cloudExists,
     sessionsDir: SESSIONS_DIR,
-    summary: state.summary,
-    sessions: state.sessions
+    summary: iCloudOnly ? cloudSummaryOf(sessions, state.summary) : state.summary,
+    sessions
   };
 }
 
@@ -488,7 +503,8 @@ export function apply(ctx, config) {
           return;
         }
         try {
-          sendJson(response, 200, Object.assign(sessionSnapshot(hostCtx, sessionEngine), { codexTab: codexTabPatch }));
+          const requested = new URL(request.url === undefined ? "/" : String(request.url), "http://127.0.0.1").searchParams.get("scope");
+          sendJson(response, 200, Object.assign(sessionSnapshot(hostCtx, sessionEngine, requested === "cloud" ? "cloud" : "all"), { codexTab: codexTabPatch }));
         } catch (error) {
           sendJson(response, 500, { ok: false, error: error instanceof Error ? error.message : String(error) });
         }
@@ -530,7 +546,8 @@ export function apply(ctx, config) {
               : action === "download"
                 ? sessionEngine.download(sessionId, live)
                 : sessionEngine.remove(sessionId);
-            sendJson(response, 200, Object.assign({ action }, result, { snapshot: sessionSnapshot(hostCtx, sessionEngine) }));
+            const scope = body.scope === "cloud" ? "cloud" : "all";
+            sendJson(response, 200, Object.assign({ action }, result, { snapshot: sessionSnapshot(hostCtx, sessionEngine, scope) }));
           } catch (error) {
             const code = error !== null && typeof error === "object" && typeof error.code === "string" ? error.code : "";
             const status = code === "live" || code === "cloud-pending" || code === "live-empty" ? 409 : code === "missing-local" || code === "missing-cloud" ? 404 : 400;

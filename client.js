@@ -899,7 +899,7 @@ window.__ModuleLoader__.load({
       const [note, setNote] = React.useState("");
 
       const load = React.useCallback(function () {
-        return fetch(API + "/cloud", { cache: "no-store", credentials: "same-origin", headers: { accept: "application/json" } })
+        return fetch(API + "/cloud?scope=cloud", { cache: "no-store", credentials: "same-origin", headers: { accept: "application/json" } })
           .then(function (response) {
             return response.json().then(function (data) {
               if (!response.ok || data === null || data.ok === false) {
@@ -931,7 +931,7 @@ window.__ModuleLoader__.load({
           cache: "no-store",
           credentials: "same-origin",
           headers: { "content-type": "application/json", "x-dsh-icloud-sync": "1" },
-          body: JSON.stringify({ action: action, sessionId: sessionId })
+          body: JSON.stringify({ action: action, sessionId: sessionId, scope: "cloud" })
         })
           .then(function (response) {
             return response.json().then(function (data) {
@@ -957,7 +957,9 @@ window.__ModuleLoader__.load({
       }, [props.openSession]);
 
       const data = state.data;
-      const sessions = data !== null && Array.isArray(data.sessions) ? data.sessions : [];
+      const sessions = data !== null && Array.isArray(data.sessions)
+        ? data.sessions.filter(function (session) { return session.hasCloud === true; })
+        : [];
       const summary = data !== null && data.summary ? data.summary : null;
 
       function row(session) {
@@ -1019,7 +1021,7 @@ window.__ModuleLoader__.load({
       } else if (state.error !== null) {
         body = h("div", { style: Object.assign({}, CS.empty, { color: "var(--dsw-alias-state-warn-label)" }) }, state.error);
       } else if (sessions.length === 0) {
-        body = h("div", { style: CS.empty }, "本机和云端都还没有会话。");
+        body = h("div", { style: CS.empty }, "iCloud 里还没有会话。在对话的助手操作条里点「上传到 iCloud」，这里才会出现。");
       } else {
         body = h("div", { style: CS.list }, sessions.map(row));
       }
@@ -1033,7 +1035,6 @@ window.__ModuleLoader__.load({
         summary !== null
           ? h("div", { style: CS.chips },
               h(Badge, { tone: "success" }, "已上传 " + summary.uploaded),
-              h(Badge, { tone: "info" }, "未上传 " + summary.unuploaded),
               h(Badge, { tone: summary["cloud-newer"] > 0 ? "warn" : "neutral" }, "云端更新 " + summary["cloud-newer"]),
               h(Badge, { tone: "neutral" }, "仅云端 " + summary["cloud-only"]))
           : null,

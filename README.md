@@ -34,8 +34,8 @@ reinstall from `package.json` + `pnpm-lock.yaml` on each Mac.
 The session rail has four tabs: **任务**, **频道**, **云端**, **日程**. Syncing is manual and split in
 two. **Uploading** starts inside the conversation itself: open a session, and the assistant action
 strip (the row with 复制 / 好的回答 / 有问题的回答) carries an 上传到 iCloud button, available as soon
-as the project is not running. The **云端** tab is the iCloud side: it lists what is in iCloud and
-offers 下载 and 删除云端.
+as the project is not running. The **云端** tab is the iCloud side: it lists only the sessions that
+exist in iCloud and offers 下载 and 删除云端. Sessions that live only on this Mac never show up there.
 
 - Every row shows title, project, last activity, size and one of four states: 已上传 / 未上传 /
   云端更新 / 仅云端.
@@ -200,7 +200,8 @@ MIT.
 
 侧栏现在是「任务 / 频道 / 云端 / 日程」四个页签。同步完全手动，分为两半：**上传**在对话里发起——
 打开会话后，助手消息操作条（也就是「复制 / 好的回答 / 有问题的回答」那一行）最右边有「上传到
-iCloud」按钮，项目没在运行时就能点；**云端**页签是 iCloud 侧，负责「下载」和「删除云端」。
+iCloud」按钮，项目没在运行时就能点；**云端**页签是 iCloud 侧，只列出 iCloud 里真实存在的会话，
+负责「下载」和「删除云端」。只在本机、还没上传过的会话不会出现在这里。
 
 - 每行显示标题、项目、最后活动时间、大小，以及四种状态之一：已上传 / 未上传 / 云端更新 / 仅云端。
 - **上传到 iCloud**（在会话操作条里）：用本机版本覆盖这个会话的云端快照；上一版移入
