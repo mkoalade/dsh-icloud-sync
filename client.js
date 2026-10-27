@@ -778,13 +778,14 @@ window.__ModuleLoader__.load({
         borderRadius: 10,
         padding: "8px 10px",
         display: "flex",
-        gap: 8,
-        alignItems: "flex-start"
+        flexDirection: "column",
+        gap: 5
       },
+      rowHead: { display: "flex", alignItems: "center", gap: 6, minWidth: 0 },
       rowMain: { minWidth: 0, flex: "1 1 auto", display: "flex", flexDirection: "column", gap: 2 },
-      rowTitle: { fontSize: 12.5, fontWeight: 550, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+      rowTitle: { fontSize: 12.5, fontWeight: 550, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 },
       rowMeta: { color: "var(--dsw-alias-label-tertiary)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-      rowOps: { display: "flex", gap: 4, alignItems: "center", flex: "none", flexWrap: "wrap", justifyContent: "flex-end" },
+      rowOps: { display: "flex", gap: 4, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" },
       mini: {
         fontSize: 11,
         padding: "2px 8px",
@@ -1006,12 +1007,12 @@ window.__ModuleLoader__.load({
           }, "打开"));
         }
         return h("div", { key: session.id, style: CS.row },
-          h("div", { style: CS.rowMain },
-            h("div", { style: CS.rowTitle, title: session.title }, session.title),
-            h("div", { style: CS.rowMeta, title: (session.cwd || "") + (session.machine ? " · " + session.machine : "") }, meta.join(" · "))),
-          h("div", { style: CS.rowOps },
-            h(Badge, { tone: status.tone }, status.label),
-            ops.length > 0 ? h("span", { style: { display: "inline-flex", gap: 4 } }, ops) : null));
+          h("div", { style: CS.rowHead },
+            h("div", { style: CS.rowMain },
+              h("div", { style: CS.rowTitle, title: session.title }, session.title),
+              h("div", { style: CS.rowMeta, title: (session.cwd || "") + (session.machine ? " · " + session.machine : "") }, meta.join(" · "))),
+            h(Badge, { tone: status.tone }, status.label)),
+          ops.length > 0 ? h("div", { style: CS.rowOps }, ops) : null);
       }
 
       const cloudMissing = data !== null && data.cloudExists === false;
