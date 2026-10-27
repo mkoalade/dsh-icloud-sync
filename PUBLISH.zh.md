@@ -11,7 +11,7 @@
 
 1. `bash scripts/release.sh mkoalade`：把 `repository` / `homepage` / `bugs` 写进 `package.json`，
    生成 `submission/mkoalade__dsh-icloud-sync.yml`，本地提交。
-2. 建仓库、推送 `main`（commit `ff74b9c dsh-icloud-sync 1.0.0`；1.1.0 增加自动会话同步，1.2.0 改为手动中转，1.3.0 把会话上传挪进对话操作条、云端页签只管下载/删除）。
+2. 建仓库、推送 `main`（commit `ff74b9c dsh-icloud-sync 1.0.0`；1.1.0 增加自动会话同步，1.2.0 改为手动中转，1.3.0 把会话上传挪进对话操作条、云端页签只管下载/删除，1.4.0 项目整体上传/下载，1.5.0 项目右键菜单，1.6.0 项目文件随会话一起同步）。
 3. 给仓库加 topics：`dsh-plugin`、`deepseek-harness`、`dsh`、`icloud`、`macos`、`sync`。
 
 ## 发新版本

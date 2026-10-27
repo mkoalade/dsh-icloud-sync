@@ -981,6 +981,14 @@ window.__ModuleLoader__.load({
               const parts = [label];
               if (typeof data.uploaded === "number") parts.push("上传 " + data.uploaded + " 个" + (data.partial > 0 ? "（含 " + data.partial + " 个运行中会话的已落盘部分）" : ""));
               if (typeof data.downloaded === "number") parts.push("下载 " + data.downloaded + " 个");
+              if (data.files && typeof data.files === "object") {
+                if (typeof data.files.uploaded === "number") parts.push("文件上传 " + data.files.uploaded + (data.files.uploaded > 0 && data.files.bytes > 0 ? "（" + formatBytes(data.files.bytes) + "）" : ""));
+                if (typeof data.files.downloaded === "number") parts.push("文件还原 " + data.files.downloaded + (data.files.backedUp > 0 ? "，备份 " + data.files.backedUp + " 个" : ""));
+                if (data.files.uploaded === 0 && data.files.downloaded === 0 && data.files.unchanged > 0) parts.push("文件已是最新");
+                if (data.files.remapped === true) parts.push("路径已换成本机家目录：" + shortPath(data.files.path));
+              }
+              if (typeof data.filesError === "string") parts.push("文件同步失败：" + data.filesError);
+              if (typeof data.filesNote === "string") parts.push(data.filesNote);
               if (Array.isArray(data.skipped) && data.skipped.length > 0) parts.push("跳过 " + data.skipped.length + " 个");
               if (Array.isArray(data.failed) && data.failed.length > 0) parts.push("失败 " + data.failed.length + " 个");
               setNote(parts.join("，") + "。");
@@ -1083,9 +1091,11 @@ window.__ModuleLoader__.load({
         const downloadable = project ? project.downloadable : 0;
         const busyGroup = busy !== "";
         const localOnly = project ? project.localOnly : 0;
+        const files = project && project.files ? project.files : null;
         const sub = ["云端 " + cloudCount];
         if (localCount > 0) sub.push("本机 " + localCount);
         if (localOnly > 0) sub.push("未上传 " + localOnly);
+        if (files !== null) sub.push("文件 " + files.files + (files.bytes > 0 ? " · " + formatBytes(files.bytes) : ""));
         return h("div", { key: "head:" + group.key, style: CS.groupHead },
           h("div", { style: CS.groupName },
             h("div", { style: CS.groupTitle, title: project && project.name ? project.name : group.key }, name),
@@ -1094,22 +1104,22 @@ window.__ModuleLoader__.load({
             h("button", {
               type: "button",
               style: CS.mini,
-              disabled: busyGroup || uploadable === 0,
-              title: uploadable === 0 ? "这个项目在本机没有可上传的会话" : "把本项目在本机的所有会话上传到 iCloud",
+              disabled: busyGroup,
+              title: "把本项目在本机的会话和整个目录（含所有文件）上传到 iCloud",
               onClick: function () {
                 if (typeof window !== "undefined" && typeof window.confirm === "function" &&
-                    !window.confirm("把「" + name + "」在本机的 " + uploadable + " 个会话全部上传到 iCloud？云端旧副本会移入 history/。")) return;
+                    !window.confirm("把「" + name + "」发到 iCloud？\n\n会话：本机 " + localCount + " 个（运行中的只传已落盘部分）\n项目：整个目录及所有文件，按变更增量上传\n云端旧副本会移入 history/。")) return;
                 actBulk("upload-project", group.key, "已上传「" + name + "」");
               }
             }, busy === "upload-project:" + group.key ? "上传中…" : "上传项目"),
             h("button", {
               type: "button",
               style: CS.mini,
-              disabled: busyGroup || downloadable === 0,
-              title: downloadable === 0 ? "这个项目的云端版本已和本机一致" : "把本项目所有有更新的云端会话下载到本机",
+              disabled: busyGroup || (downloadable === 0 && files === null),
+              title: "把本项目的会话和整个目录按云端还原到原始路径（本机被覆盖的文件先备份）",
               onClick: function () {
                 if (typeof window !== "undefined" && typeof window.confirm === "function" &&
-                    !window.confirm("从 iCloud 下载「" + name + "」的 " + downloadable + " 个会话到本机？本机旧版本会先备份。")) return;
+                    !window.confirm("从 iCloud 还原「" + name + "」到原始路径？\n\n会话：" + downloadable + " 个有更新\n文件：" + (files !== null ? files.files + " 个" : "无") + "，路径和内容按云端逐字节还原\n本机被覆盖的文件会先备份到 history/。")) return;
                 actBulk("download-project", group.key, "已下载「" + name + "」");
               }
             }, busy === "download-project:" + group.key ? "下载中…" : "下载项目")));

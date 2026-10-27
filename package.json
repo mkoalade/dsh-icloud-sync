@@ -1,7 +1,7 @@
 {
   "name": "dsh-icloud-sync",
-  "version": "1.5.0",
-  "description": "Sync DSH profiles, plugin manifests and skills between Macs through iCloud Drive, with a settings panel, a conversation-strip session upload with a manual cloud relay and a bundled dsh-sync CLI.",
+  "version": "1.6.0",
+  "description": "Sync DSH profiles, plugin manifests, skills, session logs and whole project folders between Macs through iCloud Drive, with a settings panel, conversation-strip upload, a manual cloud relay and a bundled dsh-sync CLI.",
   "type": "module",
   "license": "MIT",
   "repository": {

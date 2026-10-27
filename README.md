@@ -16,6 +16,11 @@ Session logs are **not** part of that bundle: upload them from the conversation'
 (上传到 iCloud, next to 复制 / 好的回答 / 有问题的回答) and download or delete them from the 云端 tab
 (see below).
 
+Project workspaces travel the same way, but whole: 上传项目 sends every session of the project plus
+the entire directory tree (files, subfolders, symlinks, permission bits, incrementally by SHA-256), and
+下载项目 restores that tree byte-for-byte at the recorded path — so the other Mac can open the same
+folder and keep working, not just reread the conversation.
+
 Never synced: `node_modules`, runtimes, caches, stored credentials, the DSH app itself. Plugins
 reinstall from `package.json` + `pnpm-lock.yaml` on each Mac.
 
@@ -43,9 +48,14 @@ The same upload is also in the project's right-click menu (right-click a project
 Rows are grouped by project, and every group header carries **上传项目** and **下载项目**:
 
 - **上传项目** uploads every session of that project this Mac has, including the ones iCloud has never
-  seen (the header shows how many are 未上传). Live sessions contribute their already-persisted messages.
+  seen (the header shows how many are 未上传), then the project directory itself: every file, subfolder,
+  symlink and permission bit, incrementally by SHA-256 (`.DS_Store` is skipped, files over 4 GB are
+  reported and left out). Live sessions contribute their already-persisted messages.
 - **下载项目** downloads every cloud copy of that project that is newer than the local one; copies that
   are already identical are left alone, and running sessions are skipped instead of failing the batch.
+  It then restores the project tree from `manifest.json` (identical files are left untouched, anything
+  replaced is first archived under `DSH-Sync/history/projects/`). If the other Mac uses another user
+  name, `/Users/<them>/…` is remapped to this Mac's home directory.
 
 - Every row shows title, project, last activity, size and one of four states: 已上传 / 未上传 /
   云端更新 / 仅云端.
@@ -203,6 +213,10 @@ MIT.
 
 会话记录**不在**这个同步包里：它们只在「云端」页签里点「上传 / 下载」时才移动（见下文）。
 
+项目目录走同一套手动通道，但是整棵目录：**上传项目**除了会话，还会把项目文件夹里的所有文件、
+子目录、符号链接、权限位按 SHA-256 增量传上去；**下载项目**按清单逐字节还原到原路径，另一台 Mac
+拿到的不是「只能看历史」，而是能直接接着跑的同一个目录。
+
 不同步：`node_modules`、运行时、缓存、登录凭据、DSH 本体。插件在每台 Mac 上按
 `package.json` + `pnpm-lock.yaml` 各自安装。
 
@@ -217,10 +231,12 @@ iCloud」按钮，项目没在运行时就能点；**云端**页签是 iCloud �
 
 行按项目分组，每组标题右侧有 **上传项目** / **下载项目**：
 
-- **上传项目**：把这个项目在本机的所有会话一起传上去（包括从没上传过的，组标题会标「未上传 N」）；
-  运行中的会话传它已经落盘的部分。
+- **上传项目**：把这个项目在本机的所有会话一起传上去（包括从没上传过的，组标题会标「未上传 N」），
+  然后是项目目录本身——所有文件、子目录、符号链接、权限位，按 SHA-256 增量上传（`.DS_Store` 跳过，
+  超过 4GB 的文件会列在失败里不上传）；运行中的会话传它已经落盘的部分。
 - **下载项目**：把这个项目所有比本机新的云端副本一起拉下来；已经一致的不动，运行中的会话跳过、
-  不会让整批失败。
+  不会让整批失败。随后按 `manifest.json` 还原项目目录：内容相同的文件不动，被覆盖的文件先归档到
+  `DSH-Sync/history/projects/`；如果另一台 Mac 的用户名不同，`/Users/<对方>/…` 会换成本机家目录。
 
 - 每行显示标题、项目、最后活动时间、大小，以及四种状态之一：已上传 / 未上传 / 云端更新 / 仅云端。
 - **上传到 iCloud**（在会话操作条里）：用本机版本覆盖这个会话的云端快照；上一版移入
@@ -234,8 +250,14 @@ iCloud」按钮，项目没在运行时就能点；**云端**页签是 iCloud �
 - 不再有冲突概念：覆盖就是约定，落选的那份一定备份。
 - 附件暂时不随会话传输；另一台机器上，会话里粘贴过的图片可能缺失。
 
-云端布局：`DSH-Sync/cloud/sessions/<项目key>/session-<uuid>/`，内含 `session.v4.jsonl.zstd` 和
-`meta.json`；被覆盖的旧版落在 `DSH-Sync/history/sessions/`。
+云端布局：
+
+```
+DSH-Sync/cloud/sessions/<项目key>/session-<uuid>/   session.v4.jsonl.zstd + meta.json
+DSH-Sync/cloud/projects/<项目key>/manifest.json    原始绝对路径 + 每个文件的相对路径/大小/权限/SHA-256
+DSH-Sync/cloud/projects/<项目key>/files/<相对路径>  文件本体、符号链接的目标（.dsh-link）
+DSH-Sync/history/sessions|projects/<时间>-<机器>/  被覆盖的旧副本
+```
 
 ### 「云端」页签需要对 codex-ui 打一个小补丁
 
