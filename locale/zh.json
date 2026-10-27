@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "iCloud 同步",
-    "description": "通过 iCloud Drive 在多台 Mac 之间同步 DSH 配置、插件清单、Skills 和全部会话记录。"
+    "description": "通过 iCloud Drive 在多台 Mac 之间同步 DSH 配置、插件清单与 Skills；会话按需手动上传/下载。"
   }
 }

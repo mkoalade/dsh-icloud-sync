@@ -30,10 +30,8 @@ const HEADER = "x-dsh-icloud-sync";
 /** DSH data root; DSH_SYNC_ROOT exists so tests can point at a scratch directory. */
 const DSH_ROOT = (process.env.DSH_SYNC_ROOT || "").trim() !== "" ? process.env.DSH_SYNC_ROOT.trim() : join(homedir(), ".dsh");
 const SESSIONS_DIR = join(DSH_ROOT, "sessions");
-const ATTACHMENTS_DIR = join(DSH_ROOT, "attachments");
 const SESSION_STATE_DIR = join(DSH_ROOT, ".icloud-sync");
 const SESSION_CLOUD = (process.env.DSH_SYNC_CLOUD || "").trim() !== "" ? process.env.DSH_SYNC_CLOUD.trim() : DEFAULT_CLOUD;
-const QUIET_MS = 20000;
 
 const ACTIONS = new Map([
   ["sync", { args: ["sync"], timeout: 300000 }],
@@ -336,12 +334,10 @@ function createSessionEngine() {
   const machine = machineIdentity();
   return createCloudSessions({
     sessionsDir: SESSIONS_DIR,
-    attachmentsDir: ATTACHMENTS_DIR,
     cloudDir: SESSION_CLOUD,
     stateDir: SESSION_STATE_DIR,
     machineName: machine.name,
     machineId: machine.id,
-    quietMs: QUIET_MS,
     materialize: materializeIcloudFile
   });
 }
@@ -375,16 +371,15 @@ function liveSessionIds(hostCtx) {
 }
 
 function sessionSnapshot(hostCtx, engine) {
-  const state = engine.collect(liveSessionIds(hostCtx));
+  const state = engine.list(liveSessionIds(hostCtx));
   return {
     ok: true,
     at: new Date().toISOString(),
     machine: { name: engine.machineName, id: engine.machineId, slug: engine.machineSlug },
     cloudDir: SESSION_CLOUD,
-    cloudExists: existsSync(SESSION_CLOUD),
+    cloudExists: state.cloudExists,
     sessionsDir: SESSIONS_DIR,
-    quietMs: QUIET_MS,
-    summary: engine.summaryOf(state.sessions),
+    summary: state.summary,
     sessions: state.sessions
   };
 }
@@ -519,33 +514,24 @@ export function apply(ctx, config) {
         try {
           const body = await readJson(request);
           const action = typeof body.action === "string" ? body.action : "";
-          if (action === "sync") {
-            const report = sessionEngine.run(liveSessionIds(hostCtx));
-            sendJson(response, 200, { ok: true, action, report, snapshot: sessionSnapshot(hostCtx, sessionEngine) });
+          if (action !== "upload" && action !== "download") {
+            sendJson(response, 400, { ok: false, error: "未知操作" });
             return;
           }
-          if (action === "import") {
-            const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
-            if (!/^session-[A-Za-z0-9._-]+$/.test(sessionId)) {
-              sendJson(response, 400, { ok: false, error: "会话 id 不合法" });
-              return;
-            }
-            const result = sessionEngine.importById(sessionId);
+          const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
+          if (!/^session-[A-Za-z0-9._-]+$/.test(sessionId)) {
+            sendJson(response, 400, { ok: false, error: "会话 id 不合法" });
+            return;
+          }
+          try {
+            const live = liveSessionIds(hostCtx);
+            const result = action === "upload" ? sessionEngine.upload(sessionId, live) : sessionEngine.download(sessionId, live);
             sendJson(response, 200, Object.assign({ action }, result, { snapshot: sessionSnapshot(hostCtx, sessionEngine) }));
-            return;
+          } catch (error) {
+            const code = error !== null && typeof error === "object" && typeof error.code === "string" ? error.code : "";
+            const status = code === "live" ? 409 : code === "missing-local" || code === "missing-cloud" ? 404 : code === "cloud-pending" ? 409 : 400;
+            sendJson(response, status, { ok: false, error: error instanceof Error ? error.message : String(error) });
           }
-          if (action === "resolve") {
-            const sessionId = typeof body.sessionId === "string" ? body.sessionId : "";
-            const keep = body.keep === "local" || body.keep === "cloud" ? body.keep : "";
-            if (!/^session-[A-Za-z0-9._-]+$/.test(sessionId) || keep === "") {
-              sendJson(response, 400, { ok: false, error: "参数不完整" });
-              return;
-            }
-            const result = sessionEngine.resolve(sessionId, keep);
-            sendJson(response, 200, Object.assign({ action }, result, { snapshot: sessionSnapshot(hostCtx, sessionEngine) }));
-            return;
-          }
-          sendJson(response, 400, { ok: false, error: "未知操作" });
         } catch (error) {
           sendJson(response, 400, { ok: false, error: error instanceof Error ? error.message : String(error) });
         }
@@ -573,27 +559,6 @@ export function apply(ctx, config) {
       if (typeof timer.unref === "function") timer.unref();
       disposers.push(() => clearTimeout(timer));
     }
-
-    // Session sync pass: upload quiet changes, import cloud-only sessions, record
-    // conflicts. Runs on a timer so the tab is fresh without opening Settings.
-    let sessionRunActive = false;
-    const runSessionPass = () => {
-      if (sessionRunActive) return;
-      sessionRunActive = true;
-      try {
-        sessionEngine.run(liveSessionIds(hostCtx));
-      } catch {
-        // A sync pass must never take the host down.
-      } finally {
-        sessionRunActive = false;
-      }
-    };
-    const warmTimer = setTimeout(runSessionPass, 8000);
-    if (typeof warmTimer.unref === "function") warmTimer.unref();
-    disposers.push(() => clearTimeout(warmTimer));
-    const sessionTimer = setInterval(runSessionPass, 60000);
-    if (typeof sessionTimer.unref === "function") sessionTimer.unref();
-    disposers.push(() => clearInterval(sessionTimer));
 
     return () => {
       for (const dispose of disposers.reverse()) {

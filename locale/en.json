@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "iCloud Sync",
-    "description": "Sync DSH profiles, plugin manifests, skills, and every session between Macs through iCloud Drive."
+    "description": "Sync DSH profiles, plugin manifests and skills between Macs through iCloud Drive; sessions move on demand."
   }
 }

@@ -1,9 +1,9 @@
 # dsh-icloud-sync
 
-Keep your DeepSeek Harness setup and conversation history in step across Macs through iCloud
-Drive — profiles, plugin manifests, skills, and every session — with a **Settings → Integrations**
-panel, a **云端** tab next to 任务 / 频道, and a CLI bundled inside the package. A fresh Mac needs
-no terminal: install the plugin, open the panel, click **从云端接入**.
+Keep your DeepSeek Harness setup in step across Macs through iCloud Drive — profiles, plugin
+manifests, skills — with a **Settings → Integrations** panel, a **云端** tab next to 任务 / 频道
+that pushes and pulls single session snapshots on demand, and a CLI bundled inside the package. A
+fresh Mac needs no terminal: install the plugin, open the panel, click **从云端接入**.
 
 ## What it syncs
 
@@ -11,8 +11,9 @@ Synced, from `~/.dsh/profiles/<profile>/` plus skills:
 
 - `cordis.patch.yml`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.dsh-market/state.json`
 - `~/.agents/skills/**`
-- `~/.dsh/sessions/**` — the full session history of every project
-- `~/.dsh/attachments/**` — files pasted into those sessions
+
+Session logs are **not** part of that bundle: they move only when you press 上传 / 下载 in the
+云端 tab (see below).
 
 Never synced: `node_modules`, runtimes, caches, stored credentials, the DSH app itself. Plugins
 reinstall from `package.json` + `pnpm-lock.yaml` on each Mac.
@@ -29,23 +30,25 @@ reinstall from `package.json` + `pnpm-lock.yaml` on each Mac.
 
 ## Session sync（云端 tab）
 
-The session rail now has three tabs: **任务**, **频道**, **云端**. The 云端 tab lists every session
-on both sides with its state — 已同步 / 待上传 / 待下载 / 冲突 / 仅云端 — plus a one-click
-**立即同步**.
+The session rail has four tabs: **任务**, **频道**, **云端**, **日程**. 云端 is a manual relay, not a
+background sync: iCloud only stores the snapshots you push, and nothing there is ever modified in
+place.
 
-- A session uploads after it has been quiet for 20 seconds; a background pass also runs every 60
-  seconds while DSH is open.
-- A session that exists only in iCloud is copied into `~/.dsh/sessions`, so it shows up under 任务
-  automatically; **导入** opens it right away. Nothing on the local side is overwritten by an
-  import.
-- Both sides changed → the cloud file is kept as `session.v4@<machine>.jsonl.zstd` and the tab
-  offers **保留本机** / **保留云端**. The losing copy goes to `~/.dsh/.icloud-sync/session-backups/`
-  and `DSH-Sync/history/`, never to the bin.
-- A session that is open in the current DSH process is never overwritten or auto-imported; the tab
-  shows 待关闭会话 until you close it.
-- Cloud layout: `DSH-Sync/cloud/sessions/<project-key>/session-<uuid>/` holding
-  `session.v4.jsonl.zstd`, `session.v4@<machine>.jsonl.zstd` (conflicts only), `meta.json`, and
-  `sync.json`.
+- Every row shows title, project, last activity, size and one of four states: 已上传 / 未上传 /
+  云端更新 / 仅云端.
+- **上传** overwrites the cloud snapshot of that session; the previous snapshot moves to
+  `DSH-Sync/history/sessions/<timestamp>-<machine>/` and is never deleted.
+- **下载** overwrites the local copy; the local previous copy moves to
+  `~/.dsh/.icloud-sync/backups/sessions/<timestamp>/`. After a refresh the session shows up under
+  任务 again and continues from where it stopped. Download never writes inside the iCloud folder.
+- A session still open in this DSH process is marked 运行中 and both buttons are disabled — upload it
+  once you have closed it. Nothing is uploaded or downloaded automatically, on a timer or otherwise.
+- There is no conflict state any more: overwrite is the contract and the losing copy is archived.
+- Attachments are not transferred together with a session yet; pasted images can be missing on the
+  other Mac.
+
+Cloud layout: `DSH-Sync/cloud/sessions/<project-key>/session-<uuid>/` holding
+`session.v4.jsonl.zstd` and `meta.json`; overwritten copies land in `DSH-Sync/history/sessions/`.
 
 ### The 云端 tab needs a tiny codex-ui patch
 
@@ -146,8 +149,8 @@ dsh-sync agent on|off|status login and 15-minute background sync
 ```
 
 `--dry-run` previews, `--quiet` trims output, `--no-install` skips plugin installation. The
-background agent only uploads local changes; it never downloads while DSH is running. Session
-history is handled by the plugin's own loop (the 云端 tab), not by the CLI.
+background agent only uploads local changes; it never downloads while DSH is running. Session logs
+are not handled by the CLI at all — they move only through the 云端 tab's upload/download buttons.
 
 ## Requirements
 
@@ -159,8 +162,9 @@ nearby DSH version on each Mac. The CLI is bash 3.2-compatible and needs no runt
 - The panel is Chinese-only for now; `locale/en.json` and `locale/zh.json` carry the plugin's market
   title and description.
 - Downloading a profile while DSH runs cannot take effect until DSH restarts.
-- Credentials stay local: `~/.dsh/.credentials` is never uploaded. Sessions sync only while DSH is
-  running on at least one Mac.
+- Credentials stay local: `~/.dsh/.credentials` is never uploaded.
+- Sessions transfer without their attachments, and a session can only be uploaded after it is
+  closed in DSH.
 
 ## License
 
@@ -170,35 +174,39 @@ MIT.
 
 # dsh-icloud-sync（中文）
 
-通过 iCloud Drive 在多台 Mac 之间同步 DeepSeek Harness 的配置、插件清单、Skills 和全部会话
-记录，并在 **设置 → 集成** 里提供面板、在侧栏「任务 / 频道」之后多一个「云端」页签。命令行
-工具随包分发，新电脑装完插件即可在界面里一键接入，不需要先开终端。
+通过 iCloud Drive 在多台 Mac 之间同步 DeepSeek Harness 的配置、插件清单和 Skills，并在
+**设置 → 集成** 里提供面板、在侧栏「任务 / 频道」之后多一个「云端」页签，按需手动上传/下载
+单个会话快照。命令行工具随包分发，新电脑装完插件即可在界面里一键接入，不需要先开终端。
 
 ## 同步范围
 
 - `~/.dsh/profiles/desktop/` 下的 `cordis.patch.yml`、`package.json`、`pnpm-lock.yaml`、
   `pnpm-workspace.yaml`、`.dsh-market/state.json`
 - `~/.agents/skills/**`
-- `~/.dsh/sessions/**` —— 所有项目的完整会话记录
-- `~/.dsh/attachments/**` —— 会话里粘贴的附件
+
+会话记录**不在**这个同步包里：它们只在「云端」页签里点「上传 / 下载」时才移动（见下文）。
 
 不同步：`node_modules`、运行时、缓存、登录凭据、DSH 本体。插件在每台 Mac 上按
 `package.json` + `pnpm-lock.yaml` 各自安装。
 
 ## 会话同步（云端页签）
 
-侧栏现在是「任务 / 频道 / 云端」三个页签。「云端」列出两台 Mac 上全部会话及状态
-（已同步 / 待上传 / 待下载 / 冲突 / 仅云端），并有一个「立即同步」按钮。
+侧栏现在是「任务 / 频道 / 云端 / 日程」四个页签。「云端」是**手动中转站**，不做后台同步：iCloud 里
+只放你点过「上传」的快照，下载也绝不会改动云端目录。
 
-- 会话安静 20 秒后上传；DSH 开着时后台每 60 秒扫一次。
-- 只在云端存在的会话会自动复制进 `~/.dsh/sessions`，因此任务列表里也能看到；点「导入」直接打开。
-  导入不会覆盖本机已有会话。
-- 两边都改过 → 云端文件保留为 `session.v4@<机器名>.jsonl.zstd`，页签里选「保留本机」或
-  「保留云端」；落选的一份备份到 `~/.dsh/.icloud-sync/session-backups/` 和 `DSH-Sync/history/`，
-  不会直接删掉。
-- 当前 DSH 进程里开着的会话不会被覆盖或自动导入，页签显示「待关闭会话」，关掉后再同步。
-- 云端布局：`DSH-Sync/cloud/sessions/<项目key>/session-<uuid>/`，内含
-  `session.v4.jsonl.zstd`、`session.v4@<机器名>.jsonl.zstd`（仅冲突时）、`meta.json`、`sync.json`。
+- 每行显示标题、项目、最后活动时间、大小，以及四种状态之一：已上传 / 未上传 / 云端更新 / 仅云端。
+- **上传**：用本机版本覆盖这个会话的云端快照；上一版移入
+  `DSH-Sync/history/sessions/<时间>-<机器>/`，不会删。
+- **下载**：用云端版本覆盖本机会话；本机上一版移入
+  `~/.dsh/.icloud-sync/backups/sessions/<时间>/`。刷新后任务列表里能看到它，接着上次的对话继续。
+  下载不会写云端任何文件。
+- 当前 DSH 进程里还开着的会话标记为「运行中」，两个按钮都置灰——先结束/关闭它再传。没有任何
+  定时上传、自动导入或后台扫描。
+- 不再有冲突概念：覆盖就是约定，落选的那份一定备份。
+- 附件暂时不随会话传输；另一台机器上，会话里粘贴过的图片可能缺失。
+
+云端布局：`DSH-Sync/cloud/sessions/<项目key>/session-<uuid>/`，内含 `session.v4.jsonl.zstd` 和
+`meta.json`；被覆盖的旧版落在 `DSH-Sync/history/sessions/`。
 
 ### 「云端」页签需要对 codex-ui 打一个小补丁
 
