@@ -514,7 +514,7 @@ export function apply(ctx, config) {
         try {
           const body = await readJson(request);
           const action = typeof body.action === "string" ? body.action : "";
-          if (action !== "upload" && action !== "download") {
+          if (action !== "upload" && action !== "download" && action !== "remove") {
             sendJson(response, 400, { ok: false, error: "未知操作" });
             return;
           }
@@ -525,11 +525,15 @@ export function apply(ctx, config) {
           }
           try {
             const live = liveSessionIds(hostCtx);
-            const result = action === "upload" ? sessionEngine.upload(sessionId, live) : sessionEngine.download(sessionId, live);
+            const result = action === "upload"
+              ? sessionEngine.upload(sessionId, live)
+              : action === "download"
+                ? sessionEngine.download(sessionId, live)
+                : sessionEngine.remove(sessionId);
             sendJson(response, 200, Object.assign({ action }, result, { snapshot: sessionSnapshot(hostCtx, sessionEngine) }));
           } catch (error) {
             const code = error !== null && typeof error === "object" && typeof error.code === "string" ? error.code : "";
-            const status = code === "live" ? 409 : code === "missing-local" || code === "missing-cloud" ? 404 : code === "cloud-pending" ? 409 : 400;
+            const status = code === "live" || code === "cloud-pending" || code === "live-empty" ? 409 : code === "missing-local" || code === "missing-cloud" ? 404 : 400;
             sendJson(response, status, { ok: false, error: error instanceof Error ? error.message : String(error) });
           }
         } catch (error) {

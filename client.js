@@ -304,7 +304,12 @@ window.__ModuleLoader__.load({
         ".dsh-icloud-row:hover{background:var(--dsw-alias-interactive-bg-hover);}",
         "@keyframes dsh-icloud-spin{to{transform:rotate(360deg);}}",
         ".dsh-icloud-spin{animation:dsh-icloud-spin .8s linear infinite;}",
-        "@media (max-width:680px){.dsh-icloud-stats{grid-template-columns:1fr !important;}.dsh-icloud-file-grid{grid-template-columns:minmax(0,1fr) 52px 52px 96px !important;}}"
+        "@media (max-width:680px){.dsh-icloud-stats{grid-template-columns:1fr !important;}.dsh-icloud-file-grid{grid-template-columns:minmax(0,1fr) 52px 52px 96px !important;}}",
+        ".dsh-icloud-strip{display:inline-flex;align-items:center;gap:4px;}",
+        ".dsh-icloud-strip-btn{width:28px;height:28px;border-radius:var(--dsw-radius-sm);border:none;background:transparent;color:var(--dsw-alias-label-tertiary);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;padding:6px;}",
+        ".dsh-icloud-strip-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover);color:var(--dsw-alias-label-secondary);}",
+        ".dsh-icloud-strip-btn:disabled{cursor:default;opacity:.45;}",
+        ".dsh-icloud-strip-note{font-size:13px;line-height:20px;padding-left:2px;color:var(--dsw-alias-label-tertiary);}"
       ].join("\n");
       document.head.appendChild(style);
     }
@@ -818,6 +823,76 @@ window.__ModuleLoader__.load({
      * 手动中转站：只显示列表和两个按钮，没有任何自动上传/下载。
      * 上传 = 覆盖云端（旧版进 history/）；下载 = 覆盖本机（旧版进 backups/）。
      */
+    function CloudUploadIcon() {
+      return h("svg", {
+        viewBox: "0 0 24 24",
+        width: 15,
+        height: 15,
+        fill: "none",
+        stroke: "currentColor",
+        strokeWidth: 1.8,
+        strokeLinecap: "round",
+        strokeLinejoin: "round",
+        "aria-hidden": "true"
+      },
+        h("path", { d: "M12 13v8" }),
+        h("path", { d: "m8 17 4-4 4 4" }),
+        h("path", { d: "M20 16.2A4.5 4.5 0 0 0 17.5 8h-1.8A7 7 0 0 0 4 14.9" }));
+    }
+
+    /**
+     * 助手消息操作条里的「上传到 iCloud」：和 复制 / 好的回答 / 有问题的回答 同一行。
+     * 一次点击把整段会话推到 iCloud（旧快照移入 history/），无需打开云端页签。
+     */
+    function CloudUploadAction(props) {
+      const [state, setState] = React.useState({ busy: false, note: null, failed: false });
+      const timer = React.useRef(null);
+      React.useEffect(function () {
+        return function () { if (timer.current !== null) window.clearTimeout(timer.current); };
+      }, []);
+      const sessionId = props.sessionId;
+      const click = React.useCallback(function () {
+        if (typeof sessionId !== "string" || sessionId === "" || state.busy) return;
+        setState({ busy: true, note: null, failed: false });
+        fetch(API + "/cloud/action", {
+          method: "POST",
+          cache: "no-store",
+          credentials: "same-origin",
+          headers: { "content-type": "application/json", "x-dsh-icloud-sync": "1" },
+          body: JSON.stringify({ action: "upload", sessionId: sessionId })
+        })
+          .then(function (response) {
+            return response.json().then(function (data) {
+              if (!response.ok || data === null || data.ok === false) {
+                throw new Error(data && data.error ? data.error : "HTTP " + response.status);
+              }
+              setState({ busy: false, failed: false, note: data.partial ? "已上传（会话仍在运行，只含已落盘消息）" : "已上传到 iCloud" });
+              if (typeof props.onUploaded === "function") props.onUploaded(sessionId);
+            });
+          })
+          .catch(function (error) {
+            setState({ busy: false, failed: true, note: error instanceof Error ? error.message : String(error) });
+          })
+          .finally(function () {
+            if (timer.current !== null) window.clearTimeout(timer.current);
+            timer.current = window.setTimeout(function () { setState({ busy: false, note: null, failed: false }); }, 4000);
+          });
+      }, [sessionId, state.busy]);
+      const label = state.busy ? "正在上传到 iCloud…" : "上传这个会话到 iCloud（旧快照移入 history/）";
+      return h("span", { className: "dsh-icloud-strip" },
+        h("button", {
+          type: "button",
+          className: "dsh-icloud-strip-btn",
+          "aria-label": "上传到 iCloud",
+          title: label,
+          disabled: state.busy,
+          onClick: click
+        }, state.busy ? h("span", { className: "dsh-icloud-spin", style: { display: "inline-block", width: 15, height: 15 } }) : h(CloudUploadIcon)),
+        state.note !== null
+          ? h("span", { className: "dsh-icloud-strip-note", role: "status", style: state.failed ? { color: "var(--dsw-alias-state-warn-label)" } : null }, state.note)
+          : null);
+    }
+
     function CloudSessionsPanel(props) {
       const [state, setState] = React.useState({ loading: true, error: null, data: null });
       const [busy, setBusy] = React.useState("");
@@ -894,14 +969,18 @@ window.__ModuleLoader__.load({
         const busyRow = busy !== "";
         const ops = [];
         if (session.live) ops.push(h(Badge, { tone: "warn" }, "运行中"));
-        if (session.canUpload) {
+        if (session.hasCloud) {
           ops.push(h("button", {
             type: "button",
             style: CS.mini,
             disabled: busyRow,
-            title: "把本机这个会话覆盖到云端（旧版会移入 history/）",
-            onClick: function () { act("upload", session.id, "已上传到云端。"); }
-          }, busy === "upload:" + session.id ? "上传中…" : "上传"));
+            title: "从 iCloud 移除这份副本：移入 history/ 可找回，不影响本机和其他 Mac",
+            onClick: function () {
+              if (typeof window !== "undefined" && typeof window.confirm === "function" &&
+                  !window.confirm("从 iCloud 移除这个会话的副本？会移入 history/，本机和其他 Mac 不受影响。")) return;
+              act("remove", session.id, "已从 iCloud 移除，副本在 history/。");
+            }
+          }, busy === "remove:" + session.id ? "删除中…" : "删除云端"));
         }
         if (session.canDownload) {
           ops.push(h("button", {
@@ -961,7 +1040,7 @@ window.__ModuleLoader__.load({
         note !== "" ? h("div", { style: Object.assign({}, CS.note, { color: "var(--dsw-alias-label-secondary)" }) }, note) : null,
         cloudMissing
           ? h("div", { style: Object.assign({}, CS.note, { color: "var(--dsw-alias-label-tertiary)" }) },
-              "iCloud 里还没有云端会话目录，第一次点「上传」会自动创建。")
+              "iCloud 里还没有云端会话目录；在会话里点「上传到 iCloud」会自动创建。")
           : null,
         body,
         data !== null
@@ -1016,6 +1095,19 @@ window.__ModuleLoader__.load({
           }
         }
       };
+      try {
+        ctx.slots.inject("conversation.chat.assistant-actions", function () {
+          return ctx.slots.register({
+            name: "conversation.chat.assistant-actions",
+            id: "icloud-upload",
+            order: 20,
+            inject: function (sessionId) { return { sessionId: sessionId }; }
+          }, CloudUploadAction);
+        });
+      } catch (error) {
+        console.warn("[dsh-icloud-sync] 会话操作条挂载失败", error);
+      }
+
       try {
         ctx.slots.inject("sidebar.cloud", function () {
           return ctx.slots.register({

@@ -12,8 +12,9 @@ Synced, from `~/.dsh/profiles/<profile>/` plus skills:
 - `cordis.patch.yml`, `package.json`, `pnpm-lock.yaml`, `pnpm-workspace.yaml`, `.dsh-market/state.json`
 - `~/.agents/skills/**`
 
-Session logs are **not** part of that bundle: they move only when you press 上传 / 下载 in the
-云端 tab (see below).
+Session logs are **not** part of that bundle: upload them from the conversation's own action strip
+(上传到 iCloud, next to 复制 / 好的回答 / 有问题的回答) and download or delete them from the 云端 tab
+(see below).
 
 Never synced: `node_modules`, runtimes, caches, stored credentials, the DSH app itself. Plugins
 reinstall from `package.json` + `pnpm-lock.yaml` on each Mac.
@@ -28,21 +29,26 @@ reinstall from `package.json` + `pnpm-lock.yaml` on each Mac.
 - `manifest.tsv` is written last, so half-downloaded iCloud files never look like deletions.
 - Every push/pull backs up first: 20 local copies, 30 cloud copies.
 
-## Session sync（云端 tab）
+## Session sync（conversation strip + 云端 tab）
 
-The session rail has four tabs: **任务**, **频道**, **云端**, **日程**. 云端 is a manual relay, not a
-background sync: iCloud only stores the snapshots you push, and nothing there is ever modified in
-place.
+The session rail has four tabs: **任务**, **频道**, **云端**, **日程**. Syncing is manual and split in
+two. **Uploading** starts inside the conversation itself: open a session, and the assistant action
+strip (the row with 复制 / 好的回答 / 有问题的回答) carries an 上传到 iCloud button, available as soon
+as the project is not running. The **云端** tab is the iCloud side: it lists what is in iCloud and
+offers 下载 and 删除云端.
 
 - Every row shows title, project, last activity, size and one of four states: 已上传 / 未上传 /
   云端更新 / 仅云端.
-- **上传** overwrites the cloud snapshot of that session; the previous snapshot moves to
-  `DSH-Sync/history/sessions/<timestamp>-<machine>/` and is never deleted.
+- **上传到 iCloud** overwrites the cloud snapshot of that session; the previous snapshot moves to
+  `DSH-Sync/history/sessions/<timestamp>-<machine>/` and is never deleted. Uploading a session that
+  is still open snapshots only the messages already written to disk.
 - **下载** overwrites the local copy; the local previous copy moves to
   `~/.dsh/.icloud-sync/backups/sessions/<timestamp>/`. After a refresh the session shows up under
   任务 again and continues from where it stopped. Download never writes inside the iCloud folder.
-- A session still open in this DSH process is marked 运行中 and both buttons are disabled — upload it
-  once you have closed it. Nothing is uploaded or downloaded automatically, on a timer or otherwise.
+- **删除云端** removes only the iCloud copy, archiving it under
+  `DSH-Sync/history/sessions/<timestamp>-<machine>/`; the local log and every other Mac stay intact.
+- Download is disabled while the session is open (运行中) — close it first. Nothing is uploaded or
+  downloaded automatically, on a timer or otherwise.
 - There is no conflict state any more: overwrite is the contract and the losing copy is archived.
 - Attachments are not transferred together with a session yet; pasted images can be missing on the
   other Mac.
@@ -150,7 +156,8 @@ dsh-sync agent on|off|status login and 15-minute background sync
 
 `--dry-run` previews, `--quiet` trims output, `--no-install` skips plugin installation. The
 background agent only uploads local changes; it never downloads while DSH is running. Session logs
-are not handled by the CLI at all — they move only through the 云端 tab's upload/download buttons.
+are not handled by the CLI at all — upload them from the conversation's action strip, download or
+delete them in the 云端 tab.
 
 ## Requirements
 
@@ -163,8 +170,8 @@ nearby DSH version on each Mac. The CLI is bash 3.2-compatible and needs no runt
   title and description.
 - Downloading a profile while DSH runs cannot take effect until DSH restarts.
 - Credentials stay local: `~/.dsh/.credentials` is never uploaded.
-- Sessions transfer without their attachments, and a session can only be uploaded after it is
-  closed in DSH.
+- Sessions transfer without their attachments. Uploading a session that is still open captures only
+  the messages already flushed to disk.
 
 ## License
 
@@ -189,19 +196,21 @@ MIT.
 不同步：`node_modules`、运行时、缓存、登录凭据、DSH 本体。插件在每台 Mac 上按
 `package.json` + `pnpm-lock.yaml` 各自安装。
 
-## 会话同步（云端页签）
+## 会话同步（会话操作条 + 云端页签）
 
-侧栏现在是「任务 / 频道 / 云端 / 日程」四个页签。「云端」是**手动中转站**，不做后台同步：iCloud 里
-只放你点过「上传」的快照，下载也绝不会改动云端目录。
+侧栏现在是「任务 / 频道 / 云端 / 日程」四个页签。同步完全手动，分为两半：**上传**在对话里发起——
+打开会话后，助手消息操作条（也就是「复制 / 好的回答 / 有问题的回答」那一行）最右边有「上传到
+iCloud」按钮，项目没在运行时就能点；**云端**页签是 iCloud 侧，负责「下载」和「删除云端」。
 
 - 每行显示标题、项目、最后活动时间、大小，以及四种状态之一：已上传 / 未上传 / 云端更新 / 仅云端。
-- **上传**：用本机版本覆盖这个会话的云端快照；上一版移入
-  `DSH-Sync/history/sessions/<时间>-<机器>/`，不会删。
-- **下载**：用云端版本覆盖本机会话；本机上一版移入
+- **上传到 iCloud**（在会话操作条里）：用本机版本覆盖这个会话的云端快照；上一版移入
+  `DSH-Sync/history/sessions/<时间>-<机器>/`，不会删。会话还开着时上传，只包含已经落盘的消息。
+- **下载**（云端页签）：用云端版本覆盖本机会话；本机上一版移入
   `~/.dsh/.icloud-sync/backups/sessions/<时间>/`。刷新后任务列表里能看到它，接着上次的对话继续。
   下载不会写云端任何文件。
-- 当前 DSH 进程里还开着的会话标记为「运行中」，两个按钮都置灰——先结束/关闭它再传。没有任何
-  定时上传、自动导入或后台扫描。
+- **删除云端**：只移除 iCloud 里的这份副本，并归档到
+  `DSH-Sync/history/sessions/<时间>-<机器>/`；本机和其它 Mac 不受影响。
+- 会话在运行中（「运行中」）时不能下载——先结束/关闭它。没有任何定时上传、自动导入或后台扫描。
 - 不再有冲突概念：覆盖就是约定，落选的那份一定备份。
 - 附件暂时不随会话传输；另一台机器上，会话里粘贴过的图片可能缺失。
 
